@@ -260,7 +260,7 @@ class AccumulationTrainer:
     def run_global_training(self, start_date, warmup_days, train_end_date, val_end_date,
                             output_pkl='chip_accumulation_v6.pkl', symbols=None, max_stocks=None,
                             feature_contri_overrides=None, skip_audit_csv=False, mkt_contri=0.45,
-                            audit_dir=None, market_neutral=False):
+                            audit_dir=None):
         """
         全量模型训练流水线
 
@@ -276,9 +276,6 @@ class AccumulationTrainer:
             audit_dir: 审计 CSV 输出目录。默认与 pkl 同目录 (旧行为)；
                        建议传 external_data/audit (外接盘) 避免撑爆系统盘。
                        存到 pkl 的 data_file 字段为绝对路径，ml_check 据此定位。
-            market_neutral: True 时训练目标市场中性化:
-                       个股日收益 - 中证全指日收益 后算 GPR, 让大盘特征失去横截面预测力
-                       (用于"降大盘过重"探索, 需在 mkt_contri=1.0 下对比验证)。
         """
         # 1. 准备大盘环境快照 (MarketData)
         # 这里会扫描所有 Network 计算广度、拥挤度，并合并指数环境特征
@@ -289,20 +286,6 @@ class AccumulationTrainer:
         mkt_context = pd.read_parquet('market_context_cache.parquet')
         mkt_context = mkt_context.set_index('date')
         mkt_context.index = pd.to_datetime(mkt_context.index)
-
-        # 市场中性化基准: 中证全指日收益序列 (供 target 扣减市场共同运动)
-        mkt_ret_daily = None
-        if market_neutral:
-            try:
-                zzqz = pd.read_excel('zzqz_df.xlsx')
-                zzqz = zzqz.rename(columns={'日期': 'date', '收盘': 'close'})
-                zzqz['date'] = pd.to_datetime(zzqz['date'])
-                zzqz = zzqz.sort_values('date').set_index('date')
-                mkt_ret_daily = zzqz['close'].pct_change()
-                logging.info("市场中性化: 已加载中证全指日收益序列")
-            except Exception as e:
-                logging.error(f"市场中性化基准加载失败, 回退原始 target: {e}")
-                mkt_ret_daily = None
 
         # 2. 个股特征并行/串行提取
         if symbols is None:
@@ -331,10 +314,6 @@ class AccumulationTrainer:
                 # --- 计算 Target (GPR: Gain-to-Pain Ratio) ---
                 # 注意：Target 必须在截面标准化之前算好
                 daily_ret = df['close'].pct_change(1)
-                if market_neutral and mkt_ret_daily is not None:
-                    # 市场中性化: 剔除市场共同运动, 大盘特征对横截面 target 失去预测力
-                    mkt_daily = df['date'].map(mkt_ret_daily).ffill().fillna(0.0)
-                    daily_ret = daily_ret - mkt_daily
                 window = 20
                 f_pos_sum = daily_ret.clip(lower=0).rolling(window).sum().shift(-window-1)
                 f_neg_sum = daily_ret.clip(upper=0).abs().rolling(window).sum().shift(-window-1)
