@@ -18,10 +18,13 @@ class FeatureConfig:
         'dist_to_avg', 'dist_to_high90',   
         'ema_penetrate_up', 'ema_decay_dn',
         'ema_vol_stab', 'res_vol_stab',
-        'ema_vp_corr',                     
+        'ema_vp_corr', 'res_vp_corr',
         'ema_cost_v',
         'ema_turnover_vol', 'ema_turnover_max_res', 
-        'ema_bias_norm', 'res_bias_norm'
+        'ema_bias_norm', 'res_bias_norm',
+        'acc_confirm', 'vp_diverg',
+        'rs_20', 'rs_60',
+        'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
     ]
     BIZ_RISK_FEATURES = [
         'ema_profit', 'res_profit', 
@@ -31,11 +34,14 @@ class FeatureConfig:
         'dist_to_avg', 'dist_to_high90',   
         'ema_penetrate_up', 'ema_decay_dn',
         'ema_vol_stab', 'res_vol_stab',
-        'ema_vp_corr',                     
+        'ema_vp_corr', 'res_vp_corr',
         'ema_cost_v',
         'ema_turnover_vol', 'ema_turnover_max_res', 
         'ema_bias_norm', 'res_bias_norm',
-        'stock_congestion','high_vol_interaction','vp_corr_decay'
+        'stock_congestion','high_vol_interaction','vp_corr_decay',
+        'acc_confirm', 'vp_diverg',
+        'rs_20', 'rs_60',
+        'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
     ]
 
     # 2. 大盘环境特征 (直接使用的列，不参与个股 Z-Score)
@@ -43,6 +49,14 @@ class FeatureConfig:
         'mkt_trend', 'mkt_vol', 'mkt_liq', 'mkt_position',
         'congestion', 'high20_ratio', 'low20_ratio'
     ]
+
+    # 2.5 行业内分位特征 (横截面 rank, 天然 0~1, 无需 Z-Score, 不加权)
+    # ind_inner_rank: 个股 rs_20 在所属申万一级行业内的分位排名 (个股级)
+    # ind_rank_20/60: 31 个申万一级行业按行业RS排名的分位 (全市场共享常数, 行业级)
+    # ⚠️ 2026-08 gate 均 FAIL: ind_inner_rank 与 rs_20 相关 0.72 (重复信息);
+    #    ind_rank 单因子 IC 显著为负 (-0.043) 且模型内增量仅 +0.0012。
+    #    现置空防污染, 计算代码 (compute_industry_inner_rank/map_industry_rank) 保留待重启用。
+    RANK_FEATURES = []
 
     # 3. 模型最终喂入的列名 (自动生成)
     @classmethod
@@ -52,7 +66,7 @@ class FeatureConfig:
         # 加上复合特征
         composite = ['profit_bias_div_z']
         # 加上大盘特征
-        return z_features + composite + cls.MKT_FEATURES
+        return z_features + composite + cls.MKT_FEATURES + cls.RANK_FEATURES
     
     @classmethod
     def get_risk_model_input_features(cls):
@@ -61,7 +75,7 @@ class FeatureConfig:
         # 加上复合特征
         composite = ['profit_bias_div_z']
         # 加上大盘特征
-        return z_features + composite + cls.MKT_FEATURES
+        return z_features + composite + cls.MKT_FEATURES + cls.RANK_FEATURES
     
 # ==========================================
 # Numba 核心算子：动态可变窗口 EMA
@@ -393,13 +407,20 @@ def calculate_global_mkt_factors(file_path='zzqz_df.xlsx'):
         # --- 5. 价格位置因子 (Position): 反映中长期支撑阻力位 ---
         mkt_position_rank = df['close'].rolling(250, min_periods=120).rank(pct=True)
 
+        # --- 6. 大盘对数收益基准 (供个股相对强度特征作参照) ---
+        # 个股相对强度 = 个股对数收益 - 大盘对数收益 (同期窗口)
+        mkt_ret_20 = df['ret'].rolling(20).sum()
+        mkt_ret_60 = df['ret'].rolling(60).sum()
+
         # 封装结果
         res = {
             'mkt_trend': mkt_trend_rank,      # 趋势得分 (0-1)
             'mkt_vol': mkt_vol_rank,          # 风险得分 (0-1, 越大越震荡)
             'mkt_liq': mkt_liq_rank,          # 流动性得分 (0-1, 越大越活跃)
             'mkt_bias': mkt_bias_rank,        # 超买得分 (0-1, 越大越超买)
-            'mkt_position': mkt_position_rank # 长期位置得分 (0-1, 越大离高点越近)
+            'mkt_position': mkt_position_rank, # 长期位置得分 (0-1, 越大离高点越近)
+            'mkt_ret_20': mkt_ret_20,         # 大盘 20 日对数收益 (相对强度基准)
+            'mkt_ret_60': mkt_ret_60          # 大盘 60 日对数收益 (相对强度基准)
         }
         
         final_df = pd.DataFrame(res)
@@ -474,15 +495,11 @@ def calculate_high_low_stats(stock_data, lookback_periods=[5, 10, 20, 60]):
     breadth_stats['high20_a_smooth'] = breadth_stats['high20_a'].rolling(3).mean()
     for col in ['low20', 'low60', 'high20', 'high60']:
         if col in breadth_stats.columns:
-            breadth_stats[f'{col}_q20'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.2)
-            breadth_stats[f'{col}_q30'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.3)
-            breadth_stats[f'{col}_q40'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.4)
-            breadth_stats[f'{col}_q50'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.5)
-            breadth_stats[f'{col}_q60'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.6)
-            breadth_stats[f'{col}_q70'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.7)
-            breadth_stats[f'{col}_q75'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.75)
-            breadth_stats[f'{col}_q90'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.9)
-            breadth_stats[f'{col}_q95'] = breadth_stats[col].rolling(120, min_periods=30).quantile(0.95)
+            q_vals = {0.2: 'q20', 0.3: 'q30', 0.4: 'q40', 0.5: 'q50', 0.6: 'q60',
+                      0.7: 'q70', 0.75: 'q75', 0.9: 'q90', 0.95: 'q95'}
+            qcols = {f'{col}_{tag}': breadth_stats[col].rolling(120, min_periods=30).quantile(p)
+                     for p, tag in q_vals.items()}
+            breadth_stats = pd.concat([breadth_stats, pd.DataFrame(qcols, index=breadth_stats.index)], axis=1)
     
     # 2. 广度均线 (用于判断动能斜率)
     breadth_stats['high10_ma5'] = breadth_stats['high10'].rolling(5, min_periods=2).mean()
@@ -490,10 +507,23 @@ def calculate_high_low_stats(stock_data, lookback_periods=[5, 10, 20, 60]):
     breadth_stats['low20_ma5'] = breadth_stats['low20'].rolling(5, min_periods=1).mean()
 
     # 3. 补全你代码中用到的其他特定分位数 (按需添加)
-    breadth_stats['low_ratio_q80'] = breadth_stats['low_ratio'].rolling(120, min_periods=30).quantile(0.8)
-    breadth_stats['low_v_q80'] = breadth_stats['low_v'].rolling(120, min_periods=30).quantile(0.8)
-    breadth_stats['high_ratio_q85'] = breadth_stats['high_ratio'].rolling(120, min_periods=30).quantile(0.85)
-    breadth_stats['high_ratio_q90'] = breadth_stats['high_ratio'].rolling(120, min_periods=30).quantile(0.9)
+    extra_qcols = {
+        'low_ratio_q80': breadth_stats['low_ratio'].rolling(120, min_periods=30).quantile(0.8),
+        'low_v_q80': breadth_stats['low_v'].rolling(120, min_periods=30).quantile(0.8),
+        'high_ratio_q85': breadth_stats['high_ratio'].rolling(120, min_periods=30).quantile(0.85),
+        'high_ratio_q90': breadth_stats['high_ratio'].rolling(120, min_periods=30).quantile(0.9),
+    }
+    breadth_stats = pd.concat([breadth_stats, pd.DataFrame(extra_qcols, index=breadth_stats.index)], axis=1)
+
+    # 4. ratio 滚动分位数 (替代 is_market_ok 中的固定百分比阈值, 随大盘整体情况动态)
+    for col in ['low20_ratio', 'low10_ratio', 'high20_ratio', 'high10_ratio']:
+        if col in breadth_stats.columns:
+            q_vals = {0.1: 'q10', 0.2: 'q20', 0.3: 'q30', 0.4: 'q40', 0.5: 'q50',
+                      0.6: 'q60', 0.7: 'q70', 0.75: 'q75', 0.8: 'q80', 0.85: 'q85',
+                      0.9: 'q90', 0.95: 'q95'}
+            qcols = {f'{col}_{tag}': breadth_stats[col].rolling(120, min_periods=30).quantile(p)
+                     for p, tag in q_vals.items()}
+            breadth_stats = pd.concat([breadth_stats, pd.DataFrame(qcols, index=breadth_stats.index)], axis=1)
 
     # 5. 极速向量化计算大盘拥挤度 (V6 物理性能版)
     def get_top_pct_ratio(group, pct=0.05):
@@ -546,23 +576,31 @@ def sync_market_context_file(cache_dir, output_path='market_context_cache.parque
     """
     扫描所有数据库，生成全市场环境因子（广度、拥挤度等）并持久化。
     使用 Parquet 格式，读取速度比 CSV 快 10 倍以上。
+
+    统一经 LocalDataCache 读取（qfq 前复权，与 backtest 推理时的
+    GLOBAL_MARKET_STATS 完全对齐），并对齐中证全指 (000985) 股票池口径。
     """
+    from local_data_cache import LocalDataCache
+    from screen import basic_screen
     logging.info("开始同步大盘环境快照...")
-    
-    all_symbols = [f for f in os.listdir(cache_dir) if f.endswith('.db') and '-' not in f]
+
+    all_symbols = basic_screen(cache_dir=cache_dir)
+    logging.info(f"中证全指股票池: {len(all_symbols)} 只")
+    ldc = LocalDataCache(cache_dir=cache_dir)
     basic_data_list = []
 
-    # 1. 极简读取：只取计算广度必需的列
-    for s in all_symbols:
-        db_path = os.path.join(cache_dir, s)
+    # 1. 极简读取：只取计算广度必需的列 (qfq 对齐 backtest)
+    for i, s in enumerate(all_symbols):
         try:
-            with sqlite3.connect(db_path) as conn:
-                # 仅读取计算 20 日新高、拥挤度所需的最小字段
-                df = pd.read_sql("SELECT date, close, high, low, amount FROM stock_data", conn)
-                df['symbol'] = s.replace('.db', '')
-                basic_data_list.append(df)
+            df = ldc.get_stock_data(s, '1990-01-01', '2100-01-01', adjust='qfq', mode=2)
+            if df is None or df.empty:
+                continue
+            df['symbol'] = s
+            basic_data_list.append(df[['date', 'symbol', 'close', 'high', 'low', 'amount']])
         except Exception:
             continue
+        if i % 1000 == 0:
+            logging.info(f"已读取 {i} / {len(all_symbols)}")
 
     full_market = pd.concat(basic_data_list)
     full_market['date'] = pd.to_datetime(full_market['date'])
@@ -576,8 +614,10 @@ def sync_market_context_file(cache_dir, output_path='market_context_cache.parque
     final_context = mkt_breadth.merge(mkt_factors, on='date', how='left')
     
     # 4. 持久化
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
     final_context.to_parquet(output_path)
-    logging.info(f"大盘环境快照已同步至: {output_path}")
+    logging.info(f"大盘环境快照已同步至: {output_path} (共 {len(final_context)} 个交易日)")
     return final_context
 
 
@@ -662,6 +702,9 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
         df['ema_vp_corr'] = dynamic_ema(vp_corr, w_slow)
     else:
         df['ema_vp_corr'] = vp_corr
+    # 建议3b: 量价相关性残差 (当日 vp_corr 相对平滑基线的偏离)
+    # 残差为正 = 近期量价协同增强(量价齐升/齐跌), 残差为负 = 量价背离(价动量缩)
+    df['res_vp_corr'] = vp_corr - df['ema_vp_corr']
 
     # --- 6. 价格位置与支撑特征 (Raw Ratios) ---
     df['dist_to_avg'] = (c / (chips[1] + 1e-9)) - 1.0
@@ -690,6 +733,34 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
     turnover_rel = (t / t_mean_20).astype(np.float64)
     df['ema_turnover_vol'] = dynamic_ema(turnover_rel, w_slow)
 
+    # 组合特征: 换手率多维拆解 (turnover 主导地位分散)
+    # 1) turn_vol_mom: 换手率动量 (5日均量/20日均量 - 1, 捕捉短期放量趋势)
+    t_mean_5 = pd.Series(t).rolling(5, min_periods=1).mean().values + 1e-9
+    df['turn_vol_mom'] = (t_mean_5 / t_mean_20 - 1.0).astype(np.float64)
+    # 2) turn_vol_stab: 换手率稳定性 (20日波动率的负向, 高=量能稳定)
+    t_std_20 = pd.Series(t).rolling(20, min_periods=1).std().values
+    t_std_20 = np.nan_to_num(t_std_20, nan=0.0)
+    df['turn_vol_stab'] = -(t_std_20 / t_mean_20).astype(np.float64)
+    # 3) turn_price_sync: 量价同步 (换手率变化方向 × 价格变化方向, 量价共振=正)
+    t_ret = pd.Series(t).pct_change().fillna(0).values
+    c_ret = pd.Series(c).pct_change().fillna(0).values
+    df['turn_price_sync'] = (np.sign(t_ret) * np.sign(c_ret)).astype(np.float64)
+
+    # 建议2: 吸筹确认交互项 (放量 × 筹码变集中)
+    # 放量(turnover_vol>1) 且筹码变集中(conc_90 当日低于平滑值) → 确认主力吸筹 → 正值
+    # 孤立放量但筹码不集中 → 负值或接近0 → 不奖励
+    # 用相对变化率让量级与换手率可乘 (集中度绝对变化仅 ~0.002 级, 直接乘趋近于0)
+    # 连续形式: (turnover_vol - 1) × (-conc_90 相对变化), 不放量时自然为负/0
+    activation = (df['ema_turnover_vol'] - 1.0)
+    conc_tightening = (-df['res_conc_90'] / (df['ema_conc_90'] + 1e-9))
+    df['acc_confirm'] = activation * conc_tightening
+
+    # 建议3: 高位缩量背离 (价格乖离高位 × 量能萎缩 → 上涨动能枯竭警示)
+    # ema_bias_norm 高位(+z) 同时 ema_turnover_vol 缩量(<1) → 背离 → 负值
+    # 价格高位 + 放量 → 维持强势 → 正值
+    vol_deficit = (df['ema_turnover_vol'] - 1.0).clip(upper=0.0)
+    df['vp_diverg'] = -vol_deficit * df['ema_bias_norm'].clip(lower=0.0)
+
     vol_stab = pd.Series(t).rolling(20).std() / (pd.Series(t).rolling(20).mean() + 1e-9)
     df['ema_vol_stab'] = dynamic_ema(vol_stab.fillna(0).values, w_mid)
     df['res_vol_stab'] = vol_stab.values - df['ema_vol_stab']
@@ -710,11 +781,31 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
     # 如果 ema_vp_corr 从 0.8 跌回 0.2，说明拉升动能枯竭
     df['vp_corr_decay'] = df['ema_vp_corr'].diff(3)
 
-    # 附加：回测业务需要的原始指标（不参与模型 Z-Score，仅用于逻辑判断）
+    # --- 附加：回测业务需要的原始指标（不参与模型 Z-Score，仅用于逻辑判断）
     df['profit_ratio'] = chips[0]
     df['avg_cost'] = chips[1]
     df['concentration_70'] = chips[7]
     df['chip_penetration'] = p_pos
+
+    # --- 补全 D：个股相对市场强度 (Relative Strength vs Market) ---
+    # 业务含义：模型只做绝对贴成本/缩量判断，缺"该股相对大盘/板块的强弱"维度。
+    # 相对强度 = 个股对数收益 - 大盘对数收益 (同期窗口)，反映个股超额动量。
+    # 正 = 个股强于大盘 (领涨/抗跌)，负 = 弱于大盘 (滞涨/领跌)。
+    # 注: 原始 close 非复权, 除权日会有单日假摔, 由截面 Z-score clip(-3,3) 兜底。
+    c_log = pd.Series(np.log(c + 1e-9))
+    stock_ret_20 = c_log.diff(20).fillna(0.0)
+    stock_ret_60 = c_log.diff(60).fillna(0.0)
+    if 'mkt_ret_20' in mkt_factors.columns:
+        mkt_ret_20 = df['date'].map(mkt_factors['mkt_ret_20']).ffill().fillna(0.0).values
+        mkt_ret_60 = df['date'].map(mkt_factors['mkt_ret_60']).ffill().fillna(0.0).values
+    else:
+        mkt_ret_20 = 0.0
+        mkt_ret_60 = 0.0
+    df['rs_20'] = (stock_ret_20 - mkt_ret_20).astype(np.float64)
+    df['rs_60'] = (stock_ret_60 - mkt_ret_60).astype(np.float64)
+    # 保存个股原始对数收益 (供行业中性化残差 rs_ind_20/60 使用, 不直接进模型)
+    df['stock_ret_20'] = stock_ret_20.astype(np.float64)
+    df['stock_ret_60'] = stock_ret_60.astype(np.float64)
 
     # --- 11. 全局数值防御 (返回前最后一步) ---
     # 将所有的 inf 替换为 0，防止标准化时崩溃
@@ -728,15 +819,170 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
 # ==========================================
 # 标准化并整合输出
 # ==========================================
-def apply_standardization(final_df):
+def compute_industry_inner_rank(final_df, industry_map):
+    """
+    计算行业内个股排名特征 ind_inner_rank (0~1 分位)。
+
+    对每日每行业分组, 对 rs_20 做 rank(pct=True) —— 个股在其所属申万一级行业内的相对强弱。
+    - 缺失行业映射的股票填 0.5 (中性, 不参与行业内排名)
+    - 组内仅 1 只时 rank 为 NaN, 也填 0.5
+    修改 final_df 原址, 增加 ind_inner_rank 列。
+    """
+    if final_df is None or final_df.empty:
+        return final_df
+    if not industry_map:
+        final_df['ind_inner_rank'] = 0.5
+        return final_df
+    ind_code = final_df['symbol'].astype(str).str.zfill(6).map(industry_map).fillna('')
+    final_df['_ind_code'] = ind_code
+    final_df['ind_inner_rank'] = (
+        final_df.groupby(['date', '_ind_code'])['rs_20'].rank(pct=True)
+    )
+    # 组内样本过少 (<5) 时排名无统计意义, 填 0.5 中性, 避免孤立行业股恒得满分
+    group_sizes = final_df.groupby(['date', '_ind_code'])['rs_20'].transform('size')
+    final_df.loc[group_sizes < 5, 'ind_inner_rank'] = 0.5
+    final_df['ind_inner_rank'] = final_df['ind_inner_rank'].fillna(0.5).astype(np.float64)
+    final_df.drop(columns=['_ind_code'], inplace=True)
+    return final_df
+
+
+def calculate_industry_rank_table(industry_daily, mkt_factors):
+    """
+    计算每日每个申万一级行业的 ind_rank (0~1 分位)。
+
+    行业RS = 行业指数对数收益 - 大盘对数收益 (与个股 rs_20/60 同一基准 mkt_ret_20/60)。
+    每日对 31 个行业按行业RS截面 rank(pct=True), 得 ind_rank_20/60。
+    返回 long DataFrame: 日期, 行业代码, ind_rank_20, ind_rank_60
+    """
+    if industry_daily is None or industry_daily.empty:
+        return pd.DataFrame(columns=['日期', '行业代码', 'ind_rank_20', 'ind_rank_60'])
+
+    df = industry_daily[['代码', '日期', '收盘']].copy()
+    df['代码'] = df['代码'].astype(str)
+    df['日期'] = pd.to_datetime(df['日期'])
+    df = df.sort_values(['代码', '日期'])
+
+    df['ret'] = np.log(df['收盘'] / df['收盘'].shift(1))
+    df['ind_ret_20'] = df.groupby('代码')['ret'].transform(lambda x: x.rolling(20).sum())
+    df['ind_ret_60'] = df.groupby('代码')['ret'].transform(lambda x: x.rolling(60).sum())
+
+    # 大盘对数收益基准 (mkt_factors 可含 date 列, 也可为 date 索引)
+    if 'date' in mkt_factors.columns:
+        mkt = mkt_factors[['date', 'mkt_ret_20', 'mkt_ret_60']].copy()
+    else:
+        mkt = mkt_factors.reset_index()
+        if 'index' in mkt.columns:
+            mkt = mkt.rename(columns={'index': 'date'})
+    date_col = 'date' if 'date' in mkt.columns else mkt.columns[0]
+    mkt_20 = dict(zip(pd.to_datetime(mkt[date_col]), mkt['mkt_ret_20']))
+    mkt_60 = dict(zip(pd.to_datetime(mkt[date_col]), mkt['mkt_ret_60']))
+
+    df['mkt_ret_20'] = df['日期'].map(mkt_20).ffill()
+    df['mkt_ret_60'] = df['日期'].map(mkt_60).ffill()
+
+    df['ind_rs_20'] = df['ind_ret_20'] - df['mkt_ret_20']
+    df['ind_rs_60'] = df['ind_ret_60'] - df['mkt_ret_60']
+
+    # 每日 31 行业截面排名 (分位 0~1)
+    df['ind_rank_20'] = df.groupby('日期')['ind_rs_20'].rank(pct=True)
+    df['ind_rank_60'] = df.groupby('日期')['ind_rs_60'].rank(pct=True)
+
+    out = df[['日期', '代码', 'ind_rank_20', 'ind_rank_60']].copy()
+    out['ind_rank_20'] = out['ind_rank_20'].fillna(0.5)
+    out['ind_rank_60'] = out['ind_rank_60'].fillna(0.5)
+    return out
+
+
+def map_industry_rank(final_df, industry_map, ind_rank_table):
+    """
+    将 ind_rank_20/60 (行业级共享常数) 映射到个股行。
+    final_df 需含 'symbol' 和 'date' 列; 无行业归属或行业表缺失时填 0.5 中性。
+    修改 final_df 原址。
+    """
+    if ind_rank_table is None or ind_rank_table.empty:
+        final_df['ind_rank_20'] = 0.5
+        final_df['ind_rank_60'] = 0.5
+        return final_df
+    if not industry_map:
+        final_df['ind_rank_20'] = 0.5
+        final_df['ind_rank_60'] = 0.5
+        return final_df
+
+    rank_index = ind_rank_table.set_index(['日期', '代码'])
+    final_df['_ind_code'] = final_df['symbol'].astype(str).str.zfill(6).map(industry_map).fillna('')
+    keys = list(zip(final_df['date'], final_df['_ind_code']))
+    for col in ['ind_rank_20', 'ind_rank_60']:
+        final_df[col] = rank_index.reindex(keys)[col].to_numpy()
+        final_df[col] = final_df[col].fillna(0.5).astype(np.float64)
+    final_df.drop(columns=['_ind_code'], inplace=True)
+    return final_df
+
+
+def calculate_industry_ret_table(industry_daily):
+    """
+    计算每个行业每日的行业对数收益 (滚动 20/60 日求和)。
+    返回 long DataFrame: 日期, 行业代码, ind_ret_20, ind_ret_60
+    用于行业中性化残差 rs_ind_20/60 = 个股对数收益 - 行业对数收益。
+    """
+    if industry_daily is None or industry_daily.empty:
+        return pd.DataFrame(columns=['日期', '行业代码', 'ind_ret_20', 'ind_ret_60'])
+    df = industry_daily[['代码', '日期', '收盘']].copy()
+    df['代码'] = df['代码'].astype(str)
+    df['日期'] = pd.to_datetime(df['日期'])
+    df = df.sort_values(['代码', '日期'])
+    df['ret'] = np.log(df['收盘'] / df['收盘'].shift(1))
+    df['ind_ret_20'] = df.groupby('代码')['ret'].transform(lambda x: x.rolling(20).sum())
+    df['ind_ret_60'] = df.groupby('代码')['ret'].transform(lambda x: x.rolling(60).sum())
+    out = df[['日期', '代码', 'ind_ret_20', 'ind_ret_60']].copy()
+    out = out.rename(columns={'代码': '行业代码'})
+    return out
+
+
+def map_industry_rs(final_df, industry_map, ind_ret_table):
+    """
+    映射行业中性化相对强度 rs_ind_20/60 = 个股对数收益 - 所属行业对数收益。
+    剔除行业共同因子, 修正 rs_20/60 混入行业动量的问题 (rs 实验失败根因)。
+    final_df 需含 stock_ret_20/60 (compute_individual_indicators 已保存) 与 symbol/date。
+    无行业归属或行业表缺失时填 0 (中性, 等价于不加行业调整)。
+    修改 final_df 原址。
+    """
+    if ind_ret_table is None or ind_ret_table.empty or not industry_map:
+        final_df['rs_ind_20'] = 0.0
+        final_df['rs_ind_60'] = 0.0
+        return final_df
+
+    ret_index = ind_ret_table.set_index(['日期', '行业代码'])
+    final_df['_ind_code'] = final_df['symbol'].astype(str).str.zfill(6).map(industry_map).fillna('')
+    keys = list(zip(final_df['date'], final_df['_ind_code']))
+    for col, src in [('rs_ind_20', 'ind_ret_20'), ('rs_ind_60', 'ind_ret_60')]:
+        ind_ret = ret_index.reindex(keys)[src].to_numpy()
+        ind_ret = np.nan_to_num(ind_ret, nan=0.0)
+        final_df[col] = (final_df['stock_ret_' + col[-2:]] - ind_ret).astype(np.float64)
+    final_df.drop(columns=['_ind_code'], inplace=True)
+    return final_df
+
+
+def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_ret_table=None):
     """
     执行横截面 Z-Score 标准化及复合特征计算
     
     参数:
     - final_df: 包含所有个股原始特征的合并 DataFrame，必须包含 'date' 列
+    - industry_map: {symbol6位: 行业代码} 映射; 提供时计算行业内排名特征 ind_inner_rank
+    - ind_rank_table: 行业排名表 (calculate_industry_rank_table 输出); 提供时映射 ind_rank_20/60
+    - ind_ret_table: 行业收益表 (calculate_industry_ret_table 输出); 提供时映射 rs_ind_20/60
     """
     if final_df.empty:
         return final_df
+
+    # 0. 行业内排名 (独立分位特征, 不走 Z-Score)
+    compute_industry_inner_rank(final_df, industry_map)
+
+    # 0.5 行业排名 (行业级共享常数, 不走 Z-Score)
+    map_industry_rank(final_df, industry_map, ind_rank_table)
+
+    # 0.6 行业中性化相对强度 (个股对数收益 - 行业对数收益)
+    map_industry_rs(final_df, industry_map, ind_ret_table)
 
     # 1. 获取配置好的特征列表
     biz_features = FeatureConfig.BIZ_RISK_FEATURES

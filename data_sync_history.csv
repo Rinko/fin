@@ -1,0 +1,41 @@
+﻿时间,任务,状态,记录数,输出,备注
+2026-08-05 20:18:56,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-05 20:23:47,market,ok,8697.0,market_context_cache.parquet,
+2026-08-06 21:03:01,financial,ok,413076.0,financial_reports_all.csv,
+2026-08-06 21:03:01,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-06 21:03:01,zzqz,ok,3644.0,zzqz_df.xlsx,
+2026-08-06 21:03:01,market,ok,8697.0,market_context_cache.parquet,
+2026-08-06 21:03:01,daily,ok,,stock_data_cache/*.db,
+2026-08-07 21:53:38,financial,ok,413167.0,financial_reports_all.csv,
+2026-08-07 21:53:38,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-07 21:53:38,zzqz,ok,3645.0,zzqz_df.xlsx,
+2026-08-07 21:53:38,market,ok,8698.0,stock_data_cache/market_context_cache.parquet,
+2026-08-07 21:53:38,daily,ok,,stock_data_cache/*.db,
+2026-08-10 20:37:26,financial,ok,413279.0,financial_reports_all.csv,
+2026-08-10 20:37:26,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-10 20:37:26,zzqz,error,,,"BrowserType.launch: Executable doesn't exist at /Users/m4max/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║                                                            ║
+║     playwright install                                     ║
+║                                                            ║
+║ <3 Playwright Team                                         ║
+╚════════════════════════════════════════════════════════════╝"
+2026-08-10 20:37:26,market,ok,8699.0,stock_data_cache/market_context_cache.parquet,
+2026-08-10 20:37:26,daily,ok,,stock_data_cache/*.db,
+2026-08-10 21:21:07,financial,ok,413284.0,financial_reports_all.csv,
+2026-08-10 21:21:07,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-10 21:21:07,zzqz,ok,3646.0,zzqz_df.xlsx,
+2026-08-10 21:21:07,market,ok,8700.0,stock_data_cache/market_context_cache.parquet,
+2026-08-10 21:21:07,daily,ok,,stock_data_cache/*.db,
+2026-08-10 22:06:55,financial,ok,413284.0,financial_reports_all.csv,
+2026-08-10 22:06:55,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-10 22:06:55,zzqz,ok,3646.0,zzqz_df.xlsx,
+2026-08-10 22:06:55,market,ok,8700.0,stock_data_cache/market_context_cache.parquet,
+2026-08-10 22:06:55,daily,ok,,stock_data_cache/*.db,
+2026-08-10 22:24:08,financial,ok,413284.0,financial_reports_all.csv,
+2026-08-10 22:24:08,macro,ok,582.0,macro_china_supply_of_money_df.xlsx,
+2026-08-10 22:24:08,zzqz,ok,3646.0,zzqz_df.xlsx,
+2026-08-10 22:24:08,market,ok,8700.0,stock_data_cache/market_context_cache.parquet,
+2026-08-10 22:24:08,daily,ok,,stock_data_cache/*.db,

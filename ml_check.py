@@ -29,6 +29,12 @@ def run_comprehensive_audit(data_path='model_data.csv', model_path='accumulation
     
     pkg = joblib.load(model_path)
     model, features = pkg['model'], pkg['features']
+    # 【数据口径修复】优先使用模型自带的审计数据文件，避免错配（如 fold_5 数据审计静态模型）
+    if 'data_file' in pkg and os.path.exists(pkg['data_file']):
+        data_path = pkg['data_file']
+        logging.info(f"使用模型绑定的审计数据: {data_path}")
+    else:
+        logging.warning(f"模型未绑定数据文件或文件缺失，使用传入路径: {data_path}（可能存在口径错配）")
     logging.info(f"模型加载成功，训练特征数: {len(features)}")
 
     # 2. 阶段 1: 特征质量审计
@@ -173,19 +179,34 @@ def run_comprehensive_audit(data_path='model_data.csv', model_path='accumulation
 
     """
     审计信号时效性：预测值对未来 N 天收益的相关性
+
+    修复说明：旧逻辑在 groupby('date') 内对 target 做 shift(-lag+1)，同一日期内按行错位，
+    混入了跨股票的同日收益，无法度量真实的时间衰减，且 T+2~T+5 恒为 NaN。
+    正确做法：先按 symbol 排序，再按 symbol 分组对未来收益做前瞻 shift（与 v4 一致）。
+    前提：数据按 (symbol, date) 排序且每个 symbol 日期连续。
     """
     print("\n" + "-"*120 + f"\n{'8. Alpha 衰减审计 (IC Decay Analysis)':^120}\n" + "-"*120)
-    # 假设我们需要评估对未来 1-5 天的预测力
-    # 注意：这需要数据中有未来几天的收益率，或者在脚本中通过 shift 处理
+    eval_df = eval_df.sort_values(['symbol', 'date']).reset_index(drop=True)
+    # 用真实未来 N 日收益构造前瞻列（pct_change(20) 已给出 20 日收益，这里直接用 close 的 N 日收益）
+    if 'close' in eval_df.columns:
+        for lag in range(1, 6):
+            eval_df[f'fwd_ret_{lag}d'] = eval_df.groupby('symbol')['close'].pct_change(lag).shift(-lag)
+        decay_cols = {f'fwd_ret_{lag}d': f'T+{lag}' for lag in range(1, 6)}
+    else:
+        # 无 close 时退化为按 symbol 前瞻 target（近似未来20日收益对齐）
+        for lag in range(1, 6):
+            eval_df[f'target_fwd_{lag}d'] = eval_df.groupby('symbol')['target'].shift(-lag)
+        decay_cols = {f'target_fwd_{lag}d': f'T+{lag}' for lag in range(1, 6)}
+
     decay_results = []
-    for lag in range(1, 6):
-        # 简化版：计算预测值与 target (T+1) 的滞后相关性
-        # 实战中建议直接用 T+n 的真实 return 计算
+    for col, horizon in decay_cols.items():
         ic = eval_df.groupby('date').apply(
-            lambda x: spearmanr(x['pred'], x['target'].shift(-lag+1))[0] if len(x)>20 else np.nan
+            lambda x: spearmanr(x['pred'], x[col])[0]
+            if (len(x) > 20 and x[col].notna().sum() > 10 and x[col].nunique() > 1) else np.nan,
+            include_groups=False
         ).mean()
-        decay_results.append({'Horizon': f'T+{lag}', 'RankIC': ic})
-    
+        decay_results.append({'Horizon': horizon, 'RankIC': ic})
+
     print(pd.DataFrame(decay_results).to_string(index=False))
     
 import os

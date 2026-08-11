@@ -1,2 +1,32 @@
+# ---- 数据缓存 / 中间产物 (体积大, 不入库) ----
 stock_data_cache/
 __pycache__/
+financial_reports_cache/
+*.log
+
+# ---- 训练审计数据 CSV (10-15GB/个, 防止 gc 后产生巨大 pack) ----
+*_data.csv
+debug_inference_results.csv
+global_strategy_audit.csv
+
+# ---- 模型文件 (pkl 大, 用备份而非 git) ----
+*.pkl
+*.pkl.bak*
+*_mirror.pkl
+
+# ---- 回测结果 / 报告 (可重建) ----
+results/
+report_*.md
+
+# ---- 交易数据缓存 (随时可下载重建) ----
+trades.xlsx
+orders.xlsx
+ultimate_trade_audit.xlsx
+
+# ---- 外接盘大文件中转（链接 /Volumes/MAC外接/fin_data）----
+external_data
+external_data/
+
+# ---- 环境 / 密钥 ----
+auth.json
+.venv/

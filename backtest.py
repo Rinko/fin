@@ -29,7 +29,7 @@ except ImportError:
 # 过滤 LightGBM 噪声参数警告日志
 warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
 from stock_fetcher_bao import BaostockCodeFetcher
-from localdatacache import LocalDataCache
+from local_data_cache import LocalDataCache
 import is_market_ok
 
 # =========================================================================
@@ -75,6 +75,18 @@ trained_lgbm = GLOBAL_MODEL_PKG['model']
 model_features = GLOBAL_MODEL_PKG['features']
 trained_risk_lgbm = GLOBAL_RISK_MODEL_PKG['model']
 model_risk_features = GLOBAL_RISK_MODEL_PKG['features']
+
+def reload_models(entry_pkl='chip_accumulation_v6.pkl', risk_pkl='chip_risk_model_v1.pkl'):
+    """热重载模型包，供滚动重训脚本在每次折叠后切换使用新训练权重。"""
+    global GLOBAL_MODEL_PKG, GLOBAL_RISK_MODEL_PKG
+    global trained_lgbm, model_features, trained_risk_lgbm, model_risk_features
+    GLOBAL_MODEL_PKG = joblib.load(entry_pkl)
+    GLOBAL_RISK_MODEL_PKG = joblib.load(risk_pkl)
+    trained_lgbm = GLOBAL_MODEL_PKG['model']
+    model_features = GLOBAL_MODEL_PKG['features']
+    trained_risk_lgbm = GLOBAL_RISK_MODEL_PKG['model']
+    model_risk_features = GLOBAL_RISK_MODEL_PKG['features']
+    print(f"模型已重载: {entry_pkl} + {risk_pkl}")
 
 # pm = ProxyManager(config_file="./proxies.json")
 fetcher = BaostockCodeFetcher()
@@ -144,6 +156,7 @@ def get_precomputed_financials_for_symbol(symbol):
 class AKShareChipDataSource(DataSource):
     def __init__(self):
         super().__init__()
+        self.model_schedule = None
         pybroker.register_columns(
             'symbol',
             # 'open', 'high', 'low', 'amount','amplitude','change','change_pct',
@@ -172,16 +185,29 @@ class AKShareChipDataSource(DataSource):
             'ml_rank','risk_ml_rank'
         )
 
-    def _fetch_data(self, symbols, start_date, end_date, timeframe, adjust="qfq", online=False):
+    def _fetch_data(self, symbols, start_date, end_date, timeframe, adjust="qfq", online=False,
+                    model_schedule=None):
         """
         重构后的数据准备函数：实现双通道特征对齐与内存优化
         - 入场模型：特征全平滑 (use_smooth=True)
         - 风险模型：特征不平滑 (use_smooth=False)
+        - model_schedule: [(seg_start, seg_end, entry_pkl, risk_pkl), ...] 滚动分段模型调度。
+          为空时用全局现役模型对全区间打分；提供时按日期段切换对应 fold 模型。
         """
+        if model_schedule is None:
+            model_schedule = getattr(self, 'model_schedule', None)
         # 用于分别存储平滑流和原始流的数据
         all_data_smooth = []
         all_data_raw = []
         
+        # 0. 加载个股->申万一级行业映射 (行业内排名特征用; 缺失时 ind_inner_rank 填中性)
+        try:
+            from industry_data import load_industry_map
+            industry_map = load_industry_map()
+        except Exception as e:
+            logging.warning(f"行业映射加载失败, ind_inner_rank 将填中性值: {e}")
+            industry_map = {}
+
         # 1. 准备大盘环境快照 (Market Context)
         logging.info("Step 1: 准备大盘环境快照...")
         try:
@@ -190,66 +216,69 @@ class AKShareChipDataSource(DataSource):
             logging.error(f"大盘数据加载失败: {e}")
             mkt_factors = None
 
-        if online:
-            print("正在建立 BaoStock 长连接...")
-            stock_data_cache.code_fetcher.login()
-        
-        try:
-            for symbol in symbols:
-                try:
-                    # 获取原始行情数据
-                    df = stock_data_cache.get_stock_data(symbol, start_date, end_date, online=online)
-                    if df.empty: continue
+        # 1.5 行业排名表 (行业级共享常数; 缺失时 ind_rank_20/60 填中性)
+        ind_rank_table = None
+        if mkt_factors is not None:
+            try:
+                from industry_data import load_industry_daily
+                ind_daily = load_industry_daily()
+                if not ind_daily.empty:
+                    ind_rank_table = co_compute.calculate_industry_rank_table(ind_daily, mkt_factors)
+            except Exception as e:
+                logging.warning(f"行业排名表计算失败, ind_rank_20/60 将填中性值: {e}")
 
-                    # 基础清理与数值防御
-                    df['symbol'] = df['symbol'].astype(str).str.replace('.0', '', regex=False)
-                    df['date'] = pd.to_datetime(df['date'], format='mixed')
-                    df['is_suspended'] = df['open'].isna()
-                    
-                    df['close'] = df['close'].ffill()
-                    df[['open', 'high', 'low']] = df[['open', 'high', 'low']].fillna(df['close'])
-                    df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0).clip(0.01)
+        for symbol in symbols:
+            try:
+                # 获取原始行情数据
+                df = stock_data_cache.get_stock_data(symbol, start_date, end_date, online=online)
+                if df.empty: continue
 
-                    # 计算基础业务指标 (这部分在分叉前计算，避免重复运算)
-                    df['close_ma20'] = talib.SMA(df['close'].values, 20)
-                    df['amount_ma20'] = talib.SMA(df['amount'].values, 20)
-                    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-                    df['atr_ratio'] = df['atr'] / df['close']
-                    df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14).fillna(20)
-                    df['obv'] = talib.OBV(df['close'], df['volume']).fillna(0)
-                    
-                    fin_df = get_precomputed_financials_for_symbol(symbol)
-                    if fin_df is not None and not fin_df.empty:
-                        fin_df = fin_df.rename(columns={'报告日期': 'date'})
-                        fin_df['date'] = pd.to_datetime(fin_df['date'])
-                        df = pd.merge_asof(df.sort_values('date'), fin_df.sort_values('date'), on='date', direction='backward')
-                        df['bp_ratio'] = (df['close'] / df['每股净资产'].replace(0, np.nan)).fillna(1.0)
-                    else:
-                        df['is_profit_ok'], df['roe_up'], df['bp_ratio'] = False, 0.0, 1.0
+                # 基础清理与数值防御
+                df['symbol'] = df['symbol'].astype(str).str.replace('.0', '', regex=False)
+                df['date'] = pd.to_datetime(df['date'], format='mixed')
+                df['is_suspended'] = df['open'].isna()
+                
+                df['close'] = df['close'].ffill()
+                df[['open', 'high', 'low']] = df[['open', 'high', 'low']].fillna(df['close'])
+                df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0).clip(0.01)
 
-                    # 过滤停牌与面值退市风险股
-                    df = df[(df['is_suspended'] == False) & (df['close'] >= 1.0)].copy()
-                    df = df[df['date'] >= pd.to_datetime(start_date)].copy()
-                    df = df.drop(columns=['is_suspended'])
-                    
-                    if df.empty: continue
+                # 计算基础业务指标 (这部分在分叉前计算，避免重复运算)
+                df['close_ma20'] = talib.SMA(df['close'].values, 20)
+                df['amount_ma20'] = talib.SMA(df['amount'].values, 20)
+                df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+                df['atr_ratio'] = df['atr'] / df['close']
+                df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14).fillna(20)
+                df['obv'] = talib.OBV(df['close'], df['volume']).fillna(0)
+                
+                fin_df = get_precomputed_financials_for_symbol(symbol)
+                if fin_df is not None and not fin_df.empty:
+                    fin_df = fin_df.rename(columns={'报告日期': 'date'})
+                    fin_df['date'] = pd.to_datetime(fin_df['date'])
+                    df = pd.merge_asof(df.sort_values('date'), fin_df.sort_values('date'), on='date', direction='backward')
+                    df['bp_ratio'] = (df['close'] / df['每股净资产'].replace(0, np.nan)).fillna(1.0)
+                else:
+                    df['is_profit_ok'], df['roe_up'], df['bp_ratio'] = False, 0.0, 1.0
 
-                    # ==========================================================
-                    # 【核心分叉点】：复制基础数据，分别计算平滑与非平滑特征
-                    # ==========================================================
-                    # 1) 平滑流 (用于入场模型)
-                    df_smooth = co_compute.compute_individual_indicators(df.copy(), mkt_factors, use_smooth=True)
-                    all_data_smooth.append(df_smooth)
+                # 过滤停牌与面值退市风险股
+                df = df[(df['is_suspended'] == False) & (df['close'] >= 1.0)].copy()
+                df = df[df['date'] >= pd.to_datetime(start_date)].copy()
+                df = df.drop(columns=['is_suspended'])
+                
+                if df.empty: continue
 
-                    # 2) 原始流 (用于风控离场模型)
-                    df_raw = co_compute.compute_individual_indicators(df.copy(), mkt_factors, use_smooth=False)
-                    all_data_raw.append(df_raw)
+                # ==========================================================
+                # 【核心分叉点】：复制基础数据，分别计算平滑与非平滑特征
+                # ==========================================================
+                # 1) 平滑流 (用于入场模型)
+                df_smooth = co_compute.compute_individual_indicators(df.copy(), mkt_factors, use_smooth=True)
+                all_data_smooth.append(df_smooth)
 
-                except Exception as e:
-                    print(f"个股处理失败: {symbol}, {e}")
-        finally:
-            if online:
-                stock_data_cache.code_fetcher.logout()
+                # 2) 原始流 (用于风控离场模型)
+                df_raw = co_compute.compute_individual_indicators(df.copy(), mkt_factors, use_smooth=False)
+                all_data_raw.append(df_raw)
+
+            except Exception as e:
+                print(f"个股处理失败: {symbol}, {e}")
 
         if not all_data_smooth: return pd.DataFrame()
 
@@ -286,23 +315,52 @@ class AKShareChipDataSource(DataSource):
         # ==========================================================
         # 3. 横截面标准化 (Z-Score) - 两个通道独立进行，防止特征值污染
         # ==========================================================
-        final_df_smooth = co_compute.apply_standardization(final_df_smooth)
-        final_df_raw = co_compute.apply_standardization(final_df_raw)
+        final_df_smooth = co_compute.apply_standardization(
+            final_df_smooth, industry_map=industry_map, ind_rank_table=ind_rank_table)
+        final_df_raw = co_compute.apply_standardization(
+            final_df_raw, industry_map=industry_map, ind_rank_table=ind_rank_table)
 
         # ==========================================================
         # 4. 执行机器学习推理
         # ==========================================================
-        # 1) 入场模型推理 (使用平滑后的特征输入)
-        model_input_features = co_compute.FeatureConfig.get_model_input_features()
-        final_df_smooth['raw_ml_score'] = trained_lgbm.predict(final_df_smooth[model_input_features])
+        if model_schedule:
+            # 滚动分段推理：按日期段加载对应 fold 的入场+风控模型打分
+            raw_score = np.full(len(final_df_smooth), np.nan)
+            risk_score = np.full(len(final_df_raw), np.nan)
+            for seg_start, seg_end, entry_pkl, risk_pkl in model_schedule:
+                seg_start, seg_end = pd.Timestamp(seg_start), pd.Timestamp(seg_end)
+                mask_s = (final_df_smooth['date'] >= seg_start) & (final_df_smooth['date'] <= seg_end)
+                if mask_s.sum() == 0:
+                    continue
+                epkg = joblib.load(entry_pkl)
+                epkg_feats = epkg['features']
+                raw_score[mask_s] = epkg['model'].predict(final_df_smooth.loc[mask_s, epkg_feats])
 
-        # 2) 风险模型推理 (使用非平滑的脉冲敏感型特征输入)
-        risk_model_input_features = co_compute.FeatureConfig.get_risk_model_input_features()
-        final_df_raw['risk_ml_score'] = trained_risk_lgbm.predict(final_df_raw[risk_model_input_features])
+                mask_r = (final_df_raw['date'] >= seg_start) & (final_df_raw['date'] <= seg_end)
+                rpkg = joblib.load(risk_pkl)
+                rpkg_feats = rpkg['features']
+                risk_score[mask_r] = rpkg['model'].predict(final_df_raw.loc[mask_r, rpkg_feats])
+            # 3) 合并预测得分 (防御性校验确保行数和索引完全一致)
+            assert len(final_df_smooth) == len(final_df_raw), "平滑通道与原始通道行数不一致，对齐失败"
+            final_df_smooth['raw_ml_score'] = raw_score
+            final_df_smooth['risk_ml_score'] = risk_score
+            # 确认每个 fold 段都被打分覆盖，避免 NaN 泄漏进回测
+            uncovered = final_df_smooth['raw_ml_score'].isna().sum()
+            if uncovered > 0:
+                raise ValueError(f"model_schedule 未覆盖所有日期段，{uncovered} 行缺分")
+        else:
+            # 1) 入场模型推理 (使用平滑后的特征输入)
+            # 【修复】改用模型自身保存的 features, 而非动态配置, 避免特征改造后新旧模型列数不匹配
+            model_input_features = [f for f in model_features]
+            final_df_smooth['raw_ml_score'] = trained_lgbm.predict(final_df_smooth[model_input_features])
 
-        # 3) 合并预测得分 (防御性校验确保行数和索引完全一致)
-        assert len(final_df_smooth) == len(final_df_raw), "平滑通道与原始通道行数不一致，对齐失败"
-        final_df_smooth['risk_ml_score'] = final_df_raw['risk_ml_score'].values
+            # 2) 风险模型推理 (使用非平滑的脉冲敏感型特征输入)
+            risk_model_input_features = [f for f in model_risk_features]
+            final_df_raw['risk_ml_score'] = trained_risk_lgbm.predict(final_df_raw[risk_model_input_features])
+
+            # 3) 合并预测得分 (防御性校验确保行数和索引完全一致)
+            assert len(final_df_smooth) == len(final_df_raw), "平滑通道与原始通道行数不一致，对齐失败"
+            final_df_smooth['risk_ml_score'] = final_df_raw['risk_ml_score'].values
 
         # 4) 立即销毁原始通道数据，释放宝贵的内存空间
         del final_df_raw
@@ -326,9 +384,10 @@ class AKShareChipDataSource(DataSource):
         })
         GLOBAL_SCREEN_THRESHOLDS = daily_thresholds.to_dict(orient='index')
         
-        # 调试输出
-        final_df.to_csv('debug_inference_results.csv', index=False)
-        logging.info(f"!!! 诊断文件已生成: debug_inference_results.csv")
+        # 调试输出 (默认关闭避免 9GB 磁盘占用, 检查诊断时用 DEBUG_INFERENCE=1 开启)
+        if os.environ.get('DEBUG_INFERENCE') == '1':
+            final_df.to_csv('debug_inference_results.csv', index=False)
+            logging.info(f"!!! 诊断文件已生成: debug_inference_results.csv")
 
         # ==========================================================
         # 5. 内存瘦身：仅保留回测必需的列
@@ -619,6 +678,7 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     if len(ctx.close) < 90 or ctx.close[-1] <= 2:
         return False, 0
     
+    scenario = daily_env['primary_scenario']
     day_limit = daily_env['day_limit']
     liq_limit = day_limit['amount_ma20']
     vol_limit = day_limit['atr_ratio']
@@ -638,8 +698,6 @@ def check_buy_eligibility_and_score(ctx, daily_env):
 
     profit_ratio_ma3 = np.mean(ctx.profit_ratio[-3:]) if len(ctx.profit_ratio) >= 3 else ctx.profit_ratio[-1]
     profit_ratio_threshold = ctx.indicator('profit_ratio_q20')[-1]
-    
-    scenario = daily_env['primary_scenario']
     
     # # 1. 根据大盘场景动态决定利润率门槛
     # profit_ratio_threshold = 0.1
@@ -1045,8 +1103,18 @@ def chip_strategy(ctx):
             })
 
 
-def run_backtest(symbols):
+def run_backtest(symbols, start_date=None, end_date=None, warmup=270, results_dir=None,
+                 model_schedule=None):
     data_source = AKShareChipDataSource()
+    
+    if start_date is None:
+        start_date = datetime(2021, 1, 2)
+    if end_date is None:
+        end_date = datetime(2026, 8, 7)
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, "%Y-%m-%d")
     
     config = StrategyConfig(
         initial_cash=1000000,
@@ -1063,11 +1131,14 @@ def run_backtest(symbols):
     
     strategy = Strategy(
         data_source,
-        # start_date=datetime(2012, 3, 12),
-        start_date=datetime(2021, 1, 2),
-        end_date=datetime(2026, 7, 31),
+        start_date=start_date,
+        end_date=end_date,
         config=config
     )
+
+    # 滚动分段模型调度：注入给数据源，在 _fetch_data 推理阶段按日期段切换模型
+    if model_schedule:
+        data_source.model_schedule = model_schedule
 
     # 注册原生极速 indicators 机制，并完全卸载 pybroker.model，避免回测框架内的高频 I/O 损耗
     strategy.add_execution(chip_strategy, symbols=symbols, indicators=[
@@ -1097,13 +1168,14 @@ def run_backtest(symbols):
     strategy.set_before_exec(before_exec_fn)
     
     result = strategy.backtest(
-        warmup=270,
+        warmup=warmup,
         disable_parallel=True,
         calc_bootstrap=True
     )  
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"results/{timestamp}"
+    if results_dir is None:
+        results_dir = f"results/{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
 
     with open(f"{results_dir}/result.txt", "w", encoding='utf-8') as f:
@@ -1327,3 +1399,5 @@ def run_backtest(symbols):
 
         # 记录到日志文件，方便追踪历史变化
         logging.info(f"LIVE_SIGNAL|{last_dt.date()}|{last_env['primary_scenario']}|{last_env['is_market_ok']}|{last_env['decision_reason']}")
+
+    return results_dir

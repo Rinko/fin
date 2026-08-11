@@ -11,7 +11,7 @@ def god_mode_auditor_v10():
     print("="*100)
 
     # --- 1. 数据加载与对齐 ---
-    all_results = glob.glob('results/20260801_201604/ultimate_trade_audit.xlsx')
+    all_results = glob.glob('results/*/ultimate_trade_audit.xlsx')
     if not all_results: raise FileNotFoundError("未找到归因表。")
     target_file = max(all_results, key=os.path.getmtime)
     
@@ -285,5 +285,201 @@ def god_mode_auditor_v10():
     df_t.to_excel(output_file, index=False)
     print(f"\n[系统] 审计完成。详细报告已生成至: {output_file}")
 
+
+# ==========================================================================================
+# 审计维度 H: 买入资格漏斗分解 + 候选流动性画像 (策略执行层审计)
+# 直击"模型 top 候选被 is_active 流动性门槛大量拦截"问题。
+# 输入: debug_inference_results.csv (推理打分) + global_strategy_audit.csv (每日场景)
+# ==========================================================================================
+def funnel_and_liquidity_audit(
+    debug_path='debug_inference_results.csv',
+    audit_path='global_strategy_audit.csv',
+):
+    print("\n" + "="*100)
+    print(f"{' 📊 买入资格漏斗分解 + 候选流动性画像 ':^100}")
+    print("="*100)
+
+    if not os.path.exists(debug_path):
+        print(f"❌ 缺少 {debug_path}, 请先运行 backtest 生成推理文件。")
+        return
+    if not os.path.exists(audit_path):
+        print(f"❌ 缺少 {audit_path}, 跳过。")
+        return
+
+    # 1. 场景映射 (audit)
+    audit = pd.read_csv(audit_path, usecols=['index', 'strat_primary_scenario'])
+    audit['dt'] = pd.to_datetime(audit['index'])
+    scen_map = dict(zip(audit['dt'].dt.date, audit['strat_primary_scenario']))
+    del audit
+
+    # 2. 推理数据
+    cols = ['date', 'symbol', 'ml_rank', 'bias_20', 'is_profit_ok',
+            'amount_ma20', 'atr_ratio']
+    df = pd.read_csv(debug_path, usecols=cols, dtype={'symbol': str})
+    df['date'] = pd.to_datetime(df['date'])
+    df['dt'] = df['date'].dt.date
+    df['scenario'] = df['dt'].map(scen_map).fillna('normal')
+
+    # 3. 场景相关参数 (与 backtest.py 保持一致)
+    scenario_ml_thr = {'opportunity': 0.02, 'bottom': 0.03, 'normal': 0.01,
+                       'caution': 0.01, 'risk': 0.01}
+    df['ml_thr'] = df['scenario'].map(scenario_ml_thr)
+
+    # 4. 每日流动性门槛 (横截面 30 分位 / 20 分位)
+    df['liq_q30'] = df.groupby('date')['amount_ma20'].transform(lambda x: x.quantile(0.3))
+    df['vol_q20'] = df.groupby('date')['atr_ratio'].transform(lambda x: x.quantile(0.2))
+
+    # 5. bias_con 判定 (与 check_buy_eligibility_and_score 一致)
+    def bias_ok(row):
+        sc = row['scenario']
+        if 'bottom' in sc:
+            return row['bias_20'] < 0
+        elif 'opportunity' in sc:
+            return row['bias_20'] > -0.05
+        elif 'normal' in sc:
+            return row['bias_20'] > 0.05
+        return True  # caution/risk 不设 bias 硬约束
+    df['bias_ok'] = df.apply(bias_ok, axis=1)
+
+    # 6. 漏斗各层
+    n_all = len(df)
+    l1 = df[df['ml_rank'] < df['ml_thr']]
+    l2 = l1[l1['is_profit_ok']]
+    l3 = l2[(l2['amount_ma20'] >= l2['liq_q30']) & (l2['atr_ratio'] >= l2['vol_q20'])]
+    l4 = l3[l3['bias_ok']]
+
+    def pct(x):
+        return f"{len(x)} ({len(x)/n_all*100:.2f}%)"
+
+    print(f"全市场: {n_all}")
+    print(f"  层1 ml_rank<阈值: {pct(l1)}")
+    print(f"  层2 +is_profit_ok: {pct(l2)}")
+    print(f"  层3 +is_active(q30/q20): {pct(l3)}")
+    print(f"  层4 +bias_con: {pct(l4)} (最终合格候选)")
+    print(f"  is_active 层淘汰率: {(1-len(l3)/len(l2))*100:.1f}%" if len(l2) else "  is_active 层: N/A")
+
+    # 7. 按场景分层的漏斗通过率
+    print("\n" + "-"*90)
+    print(f"{'按场景 is_active 通过率 (层2→层3)':^70}")
+    for sc in ['opportunity', 'bottom', 'normal', 'caution', 'risk']:
+        sub = l2[l2['scenario'] == sc]
+        if len(sub) == 0:
+            continue
+        sub3 = l3[l3['scenario'] == sc]
+        print(f"  {sc:12s}: 层2 {len(sub):6d} → 层3 {len(sub3):6d} | 通过率 {len(sub3)/len(sub)*100:5.1f}%")
+
+    # 8. 候选流动性画像: 层2 vs 层3 vs 层4 的成交额分布
+    print("\n" + "-"*90)
+    print(f"{'候选流动性画像 (成交额中位数, 万元)':^70}")
+    for name, sub in [('层2 (ml+profit_ok)', l2), ('层3 (过is_active)', l3),
+                      ('层4 (最终合格)', l4)]:
+        print(f"  {name:22s}: 中位数 {sub['amount_ma20'].median()/1e4:>12,.0f} | "
+              f"均值 {sub['amount_ma20'].mean()/1e4:>12,.0f} | "
+              f"P10 {sub['amount_ma20'].quantile(0.1)/1e4:>12,.0f}")
+
+    # 9. 按月的 is_active 通过率时序 (检测模型流动性偏好漂移)
+    print("\n" + "-"*90)
+    print(f"{'逐月 is_active 通过率 (检测流动性偏好漂移)':^70}")
+    l2['ym'] = l2['date'].dt.to_period('M')
+    l3_ym = l3.set_index('date').index.to_period('M')
+    l3_cnt = pd.Series(l3_ym).value_counts()
+    monthly = []
+    for ym, grp in l2.groupby('ym'):
+        l3_c = int(l3_cnt.get(ym, 0))
+        monthly.append({'月份': str(ym), '层2数': len(grp), '过is_active': l3_c,
+                        '通过率': f"{l3_c/len(grp)*100:.1f}%" if len(grp) else "N/A"})
+    mdf = pd.DataFrame(monthly)
+    if not mdf.empty:
+        print(mdf.to_string(index=False))
+
+
+# ==========================================================================================
+# 审计维度 I: 卖出后走势验证 (退出时机 vs 选股质量)
+# 对已平仓交易按卖出原因分组, 统计卖出后 3/6/12/20 日走势。
+# 判断"退出过早" (卖出后大涨) vs "模型选股失败" (卖出后继续跌)。
+# 输入: ultimate_trade_audit.xlsx (交易归因) + debug_inference_results.csv (含收盘价)
+# ==========================================================================================
+def post_exit_audit(
+    trades_path='results/walkforward_c/combined/ultimate_trade_audit.xlsx',
+    debug_path='debug_inference_results.csv',
+):
+    print("\n" + "="*100)
+    print(f"{' 🔍 卖出后走势验证 (退出时机 vs 选股质量) ':^100}")
+    print("="*100)
+
+    if not os.path.exists(trades_path):
+        print(f"❌ 缺少 {trades_path}, 跳过。")
+        return
+    if not os.path.exists(debug_path):
+        print(f"❌ 缺少 {debug_path}, 跳过。")
+        return
+
+    # 1. 加载交易
+    trades = pd.read_excel(trades_path, dtype={'symbol': str})
+    trades['exit_date'] = pd.to_datetime(trades['exit_date'])
+    required = ['symbol', 'exit_date', 'exit', 'sell_reason']
+    missing = [c for c in required if c not in trades.columns]
+    if missing:
+        print(f"❌ trades 缺少列: {missing}")
+        return
+
+    # 2. 加载价格
+    prices = pd.read_csv(debug_path, usecols=['date', 'symbol', 'close'], dtype={'symbol': str})
+    prices['date'] = pd.to_datetime(prices['date'])
+    prices = prices.sort_values(['symbol', 'date'])
+
+    # 3. 对每笔交易计算卖出后 N 日收益
+    horizons = [3, 6, 12, 20]
+    res_rows = []
+    for _, tr in trades.iterrows():
+        sym = str(tr['symbol'])
+        sub = prices[prices['symbol'] == sym]
+        if sub.empty:
+            continue
+        after = sub[sub['date'] > tr['exit_date']]
+        if after.empty:
+            continue
+        row = {'symbol': sym, 'sell_reason': str(tr['sell_reason']),
+               'exit_ret': tr['return_pct'] if 'return_pct' in trades.columns else np.nan}
+        for n in horizons:
+            if len(after) >= n:
+                row[f'post_{n}d'] = after.iloc[n-1]['close'] / tr['exit'] - 1
+            else:
+                row[f'post_{n}d'] = np.nan
+        res_rows.append(row)
+    res = pd.DataFrame(res_rows)
+    if res.empty:
+        print("❌ 无匹配的卖出后价格数据。")
+        return
+
+    # 4. 按卖出原因汇总
+    print(f"\n匹配交易数: {len(res)}")
+    print("\n" + "-"*90)
+    print(f"{'按卖出原因: 卖出后走势均值':^70}")
+    for reason, grp in res.groupby('sell_reason'):
+        if len(grp) < 3:
+            continue
+        line = f"  {reason:30s}: n={len(grp):4d} | "
+        for n in horizons:
+            v = grp[f'post_{n}d'].dropna()
+            if len(v):
+                line += f"{n}d={v.mean()*100:+5.2f}%({(v>0).mean()*100:3.0f}%) "
+        print(line)
+
+    # 5. 总体判断: 若主要卖因的卖出后收益为负, 说明模型选股失败而非退出过早
+    print("\n" + "-"*90)
+    main_reasons = res['sell_reason'].value_counts().head(3).index.tolist()
+    for r in main_reasons:
+        grp = res[res['sell_reason'] == r]
+        v12 = grp['post_12d'].dropna()
+        if len(v12):
+            verdict = ("退出过早(应多持)" if v12.mean() > 0.02
+                       else "模型选股失败(卖出后仍跌)" if v12.mean() < -0.02
+                       else "中性(横盘)")
+            print(f"  {r}: 卖出后 12d {v12.mean()*100:+.2f}% → {verdict}")
+
+
 if __name__ == "__main__":
     god_mode_auditor_v10()
+    funnel_and_liquidity_audit()
+    post_exit_audit()

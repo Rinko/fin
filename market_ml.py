@@ -19,6 +19,34 @@ except ImportError:
 # 静默警告
 warnings.filterwarnings('ignore', category=FutureWarning)
 
+_industry_map_cache = None
+
+
+def _load_industry_map():
+    """惰性加载个股->申万一级行业映射 (读外接盘缓存, 不触发抓取)。缺失时降级为空 dict。"""
+    global _industry_map_cache
+    if _industry_map_cache is None:
+        try:
+            from industry_data import load_industry_map
+            _industry_map_cache = load_industry_map()
+        except Exception as e:
+            logging.warning(f"行业映射加载失败, ind_inner_rank 将填中性值: {e}")
+            _industry_map_cache = {}
+    return _industry_map_cache
+
+
+def _load_industry_rank_table(mkt_context):
+    """按大盘基准计算行业排名表 (行业日K + mkt_ret_20/60)。缺失返回空 DataFrame (特征填中性)。"""
+    try:
+        from industry_data import load_industry_daily
+        ind_daily = load_industry_daily()
+        if ind_daily.empty:
+            return pd.DataFrame()
+        return co_compute.calculate_industry_rank_table(ind_daily, mkt_context)
+    except Exception as e:
+        logging.warning(f"行业排名表计算失败, ind_rank_20/60 将填中性值: {e}")
+        return pd.DataFrame()
+
 
 class AccumulationTrainer:
     def __init__(self, cache_dir='./stock_data_cache'):
@@ -26,9 +54,10 @@ class AccumulationTrainer:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     def get_all_symbols(self):
-        # 严格过滤：文件名必须是数字或大写字母开头，排除 metadata 库和 journaling 文件
-        return [f[:-3] for f in os.listdir(self.cache_dir) 
-                if f.endswith('.db') and not f.startswith('stock_data') and '-' not in f]
+        # 严格对齐中证全指 (000985) 口径：复用 screen.basic_screen 的统一过滤
+        # (剔除 ST/*ST、B股/新股申购前缀；保留历史退市股防生存者偏差)
+        from screen import basic_screen
+        return basic_screen(cache_dir=self.cache_dir)
     
     # def prepare_global_factors(self, index_file='zzqz_df.xlsx'):
         """计算大盘 5 维环境因子 + 全市场广度/拥挤度"""
@@ -228,12 +257,31 @@ class AccumulationTrainer:
             logging.error(f"Error processing {symbol}: {e}")
             return None
 
-    def run_global_training(self, start_date, warmup_days, train_end_date, val_end_date):
+    def run_global_training(self, start_date, warmup_days, train_end_date, val_end_date,
+                            output_pkl='chip_accumulation_v6.pkl', symbols=None, max_stocks=None,
+                            feature_contri_overrides=None, skip_audit_csv=False, mkt_contri=0.45,
+                            audit_dir=None, market_neutral=False):
         """
         全量模型训练流水线
+
+        Args:
+            output_pkl: 模型导出路径，默认覆盖现役 v6 (滚动重训时应传入独立文件避免破坏静态基准)
+            symbols: 可选股票子集 (None=全市场)。用于 feature_gate 快速验证，与生产管线完全同构。
+            max_stocks: 可选抽样上限，配合 symbols 使用 (None=全部)。
+            feature_contri_overrides: 可选 dict {特征名: 贡献系数}，用于对特定特征降权
+                                      (如 {'ema_turnover_vol_z': 0.5} 压低换手率主导地位)。
+            skip_audit_csv: 跳过导出 OOS 审计 CSV (滚动 fold 训练用, 每 fold 省 ~15GB 磁盘)
+            mkt_contri: 大盘特征的 feature_contri 系数。默认 0.45 (抑制大盘因子)，
+                        传 1.0 即关闭对大盘特征的降权 (让模型自主分配权重)。
+            audit_dir: 审计 CSV 输出目录。默认与 pkl 同目录 (旧行为)；
+                       建议传 external_data/audit (外接盘) 避免撑爆系统盘。
+                       存到 pkl 的 data_file 字段为绝对路径，ml_check 据此定位。
+            market_neutral: True 时训练目标市场中性化:
+                       个股日收益 - 中证全指日收益 后算 GPR, 让大盘特征失去横截面预测力
+                       (用于"降大盘过重"探索, 需在 mkt_contri=1.0 下对比验证)。
         """
-        # 1. 准备大盘环境快照 (Market Context)
-        # 这一步会扫描所有 DB 计算广度、拥挤度，并合并指数环境因子
+        # 1. 准备大盘环境快照 (MarketData)
+        # 这里会扫描所有 Network 计算广度、拥挤度，并合并指数环境特征
         context_path = os.path.join(self.cache_dir, 'market_context_cache.parquet')
         
         # 建议每次训练前同步一次，或者判断文件日期
@@ -242,22 +290,39 @@ class AccumulationTrainer:
         mkt_context = mkt_context.set_index('date')
         mkt_context.index = pd.to_datetime(mkt_context.index)
 
+        # 市场中性化基准: 中证全指日收益序列 (供 target 扣减市场共同运动)
+        mkt_ret_daily = None
+        if market_neutral:
+            try:
+                zzqz = pd.read_excel('zzqz_df.xlsx')
+                zzqz = zzqz.rename(columns={'日期': 'date', '收盘': 'close'})
+                zzqz['date'] = pd.to_datetime(zzqz['date'])
+                zzqz = zzqz.sort_values('date').set_index('date')
+                mkt_ret_daily = zzqz['close'].pct_change()
+                logging.info("市场中性化: 已加载中证全指日收益序列")
+            except Exception as e:
+                logging.error(f"市场中性化基准加载失败, 回退原始 target: {e}")
+                mkt_ret_daily = None
+
         # 2. 个股特征并行/串行提取
-        symbols = self.get_all_symbols()
+        if symbols is None:
+            symbols = self.get_all_symbols()
+        if max_stocks is not None:
+            symbols = symbols[:max_stocks]
         actual_train_start = (pd.to_datetime(start_date) + timedelta(days=warmup_days)).strftime('%Y-%m-%d')
         
         logging.info(f"Step 2: 提取个股时序特征，目标股票数: {len(symbols)}...")
         all_dfs = []
-        
+
+        from local_data_cache import LocalDataCache
+        ldc = LocalDataCache(cache_dir=self.cache_dir)
+
         for i, s in enumerate(symbols):
             try:
-                # 读取原始数据
-                db_path = os.path.join(self.cache_dir, f"{s}.db")
-                with sqlite3.connect(db_path) as conn:
-                    df = pd.read_sql(f"SELECT * FROM stock_data WHERE date >= '{start_date}'", conn)
-                
-                if len(df) < 150: continue
-                df['date'] = pd.to_datetime(df['date']) 
+                # 读取原始数据 (不复权原始列，与 backtest.get_stock_data 一致)
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="none", mode=2)
+                if df.empty or len(df) < 150: continue
+                df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)
                 # --- 调用公共算子：计算单股时序特征 ---
                 # 传入准备好的 mkt_context，内部会自动处理动态 EMA 窗口
@@ -266,6 +331,10 @@ class AccumulationTrainer:
                 # --- 计算 Target (GPR: Gain-to-Pain Ratio) ---
                 # 注意：Target 必须在截面标准化之前算好
                 daily_ret = df['close'].pct_change(1)
+                if market_neutral and mkt_ret_daily is not None:
+                    # 市场中性化: 剔除市场共同运动, 大盘特征对横截面 target 失去预测力
+                    mkt_daily = df['date'].map(mkt_ret_daily).ffill().fillna(0.0)
+                    daily_ret = daily_ret - mkt_daily
                 window = 20
                 f_pos_sum = daily_ret.clip(lower=0).rolling(window).sum().shift(-window-1)
                 f_neg_sum = daily_ret.clip(upper=0).abs().rolling(window).sum().shift(-window-1)
@@ -295,7 +364,11 @@ class AccumulationTrainer:
 
         # 4. 执行截面标准化 (Z-Score)
         # 内部会自动根据 co_compute.FeatureConfig.BIZ_FEATURES 进行处理并计算背离特征
-        global_data = co_compute.apply_standardization(global_data)
+        global_data = co_compute.apply_standardization(
+            global_data,
+            industry_map=_load_industry_map(),
+            ind_rank_table=_load_industry_rank_table(mkt_context),
+        )
         
         # 5. 映射大盘特征
         # 之前 compute_individual_indicators 只是用了 mkt_vol 算窗口，
@@ -317,7 +390,9 @@ class AccumulationTrainer:
         feature_contri = []
         for col in final_features:
             if col in co_compute.FeatureConfig.MKT_FEATURES:
-                feature_contri.append(0.45) # 抑制大盘因子
+                feature_contri.append(mkt_contri) # 抑制大盘因子
+            elif feature_contri_overrides and col in feature_contri_overrides:
+                feature_contri.append(feature_contri_overrides[col]) # 针对特定特征降权
             else:
                 feature_contri.append(1.0)
 
@@ -349,20 +424,40 @@ class AccumulationTrainer:
         )
     
         # 8. 导出
+        # 审计数据文件名与模型名绑定，避免多模型训练时互相覆盖（ml_check 审计对齐用）
+        audit_data_path = os.path.splitext(output_pkl)[0] + '_data.csv'
+        if audit_dir is not None:
+            os.makedirs(audit_dir, exist_ok=True)
+            audit_data_path = os.path.join(audit_dir, os.path.basename(audit_data_path))
+            audit_data_path = os.path.abspath(audit_data_path)
+        if not skip_audit_csv:
+            clean_data.to_csv(audit_data_path, index=False)
+        else:
+            audit_data_path = None
         joblib.dump({
             'model': model, 
             'features': final_features,
-            'biz_features': co_compute.FeatureConfig.BIZ_FEATURES # 额外保存原始特征清单以便追溯
-        }, 'chip_accumulation_v6.pkl')
-        
-        # 保存一份样例数据用于 ml_check 审计
-        clean_data.to_csv('model_data.csv', index=False)
+            'biz_features': co_compute.FeatureConfig.BIZ_FEATURES, # 额外保存原始特征清单以便追溯
+            'data_file': audit_data_path # 记录该模型对应的审计数据文件，ml_check 据此避免口径错配
+        }, output_pkl)
         logging.info("模型训练并导出成功，v6 架构已实现 100% 逻辑对齐。")
 
 
-    def run_global_sell_training(self, start_date, warmup_days, train_end_date, val_end_date):
+    def run_global_sell_training(self, start_date, warmup_days, train_end_date, val_end_date,
+                                 output_pkl='chip_risk_model_v1.pkl', symbols=None, max_stocks=None,
+                                 feature_contri_overrides=None, skip_audit_csv=False, mkt_contri=0.45,
+                                 audit_dir=None):
         """
         全量模型训练流水线
+
+        Args:
+            output_pkl: 模型导出路径，默认覆盖现役风控模型 (滚动重训时应传入独立文件)
+            symbols: 可选股票子集 (None=全市场)。用于 feature_gate 快速验证。
+            max_stocks: 可选抽样上限，配合 symbols 使用 (None=全部)。
+            feature_contri_overrides: 可选 dict {特征名: 贡献系数}，用于对特定特征降权。
+            mkt_contri: 大盘特征的 feature_contri 系数。默认 0.45 (抑制大盘因子)，
+                        传 1.0 即关闭对大盘特征的降权。
+            audit_dir: 审计 CSV 输出目录 (默认与 pkl 同目录)；建议传 external_data/audit。
         """
         # 1. 准备大盘环境快照 (Market Context)
         # 这一步会扫描所有 DB 计算广度、拥挤度，并合并指数环境因子
@@ -375,21 +470,24 @@ class AccumulationTrainer:
         mkt_context.index = pd.to_datetime(mkt_context.index)
 
         # 2. 个股特征并行/串行提取
-        symbols = self.get_all_symbols()
+        if symbols is None:
+            symbols = self.get_all_symbols()
+        if max_stocks is not None:
+            symbols = symbols[:max_stocks]
         actual_train_start = (pd.to_datetime(start_date) + timedelta(days=warmup_days)).strftime('%Y-%m-%d')
         
         logging.info(f"Step 2: 提取个股时序特征，目标股票数: {len(symbols)}...")
         all_dfs = []
-        
+
+        from local_data_cache import LocalDataCache
+        ldc = LocalDataCache(cache_dir=self.cache_dir)
+
         for i, s in enumerate(symbols):
             try:
-                # 读取原始数据
-                db_path = os.path.join(self.cache_dir, f"{s}.db")
-                with sqlite3.connect(db_path) as conn:
-                    df = pd.read_sql(f"SELECT * FROM stock_data WHERE date >= '{start_date}'", conn)
-                
-                if len(df) < 150: continue
-                df['date'] = pd.to_datetime(df['date']) 
+                # 读取原始数据 (不复权原始列，与 backtest.get_stock_data 一致)
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="none", mode=2)
+                if df.empty or len(df) < 150: continue
+                df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)
                 # --- 调用公共算子：计算单股时序特征 ---
                 # 传入准备好的 mkt_context，内部会自动处理动态 EMA 窗口
@@ -426,7 +524,11 @@ class AccumulationTrainer:
 
         # 4. 执行截面标准化 (Z-Score)
         # 内部会自动根据 co_compute.FeatureConfig.BIZ_FEATURES 进行处理并计算背离特征
-        global_data = co_compute.apply_standardization(global_data)
+        global_data = co_compute.apply_standardization(
+            global_data,
+            industry_map=_load_industry_map(),
+            ind_rank_table=_load_industry_rank_table(mkt_context),
+        )
         
         # 5. 映射大盘特征
         # 之前 compute_individual_indicators 只是用了 mkt_vol 算窗口，
@@ -448,7 +550,9 @@ class AccumulationTrainer:
         feature_contri = []
         for col in final_features:
             if col in co_compute.FeatureConfig.MKT_FEATURES:
-                feature_contri.append(0.45) # 抑制大盘因子
+                feature_contri.append(mkt_contri) # 抑制大盘因子
+            elif feature_contri_overrides and col in feature_contri_overrides:
+                feature_contri.append(feature_contri_overrides[col]) # 针对特定特征降权
             else:
                 feature_contri.append(1.0)
 
@@ -459,6 +563,7 @@ class AccumulationTrainer:
             reg_alpha=10.0,
             reg_lambda=10.0,
             colsample_bytree=0.6,
+            feature_contri=feature_contri,
             importance_type='gain'
         )
 
@@ -476,14 +581,22 @@ class AccumulationTrainer:
         )
     
         # 8. 导出
+        # 审计数据文件名与模型名绑定，避免多模型训练时互相覆盖（ml_check 审计对齐用）
+        audit_data_path = os.path.splitext(output_pkl)[0] + '_data.csv'
+        if audit_dir is not None:
+            os.makedirs(audit_dir, exist_ok=True)
+            audit_data_path = os.path.join(audit_dir, os.path.basename(audit_data_path))
+            audit_data_path = os.path.abspath(audit_data_path)
+        if not skip_audit_csv:
+            clean_data.to_csv(audit_data_path, index=False)
+        else:
+            audit_data_path = None
         joblib.dump({
             'model': risk_model, 
             'features': final_features,
-            'biz_features': co_compute.FeatureConfig.BIZ_RISK_FEATURES # 额外保存原始特征清单以便追溯
-        }, 'chip_risk_model_v1.pkl')
-        
-        # 保存一份样例数据用于 ml_check 审计
-        clean_data.to_csv('model_risk_data.csv', index=False)
+            'biz_features': co_compute.FeatureConfig.BIZ_RISK_FEATURES, # 额外保存原始特征清单以便追溯
+            'data_file': audit_data_path # 记录该模型对应的审计数据文件，ml_check 据此避免口径错配
+        }, output_pkl)
         logging.info("模型风险训练并导出成功")
 
 if __name__ == "__main__":
@@ -494,9 +607,9 @@ if __name__ == "__main__":
         train_end_date='2019-12-31', 
         val_end_date='2020-12-31'
     )
-    # trainer.run_global_sell_training(
-    #     start_date='2012-03-12', 
-    #     warmup_days=400, 
-    #     train_end_date='2019-12-31', 
-    #     val_end_date='2020-12-31'
-    # )
+    trainer.run_global_sell_training(
+        start_date='2012-03-12', 
+        warmup_days=400, 
+        train_end_date='2019-12-31', 
+        val_end_date='2020-12-31'
+    )

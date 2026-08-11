@@ -26,6 +26,10 @@ def run_ultimate_synergy_audit(
     # A. 买入模型加载与预测
     buy_pkg = joblib.load(buy_model_path)
     b_model, b_features = buy_pkg['model'], buy_pkg['features']
+    # 【数据口径修复】优先使用模型绑定的审计数据文件
+    if 'data_file' in buy_pkg and os.path.exists(buy_pkg['data_file']):
+        buy_data_path = buy_pkg['data_file']
+        logging.info(f"买入模型绑定数据: {buy_data_path}")
     buy_df = pd.read_csv(buy_data_path)
     buy_df['date'] = pd.to_datetime(buy_df['date'])
     buy_df['pred'] = b_model.predict(buy_df[b_features])
@@ -33,6 +37,10 @@ def run_ultimate_synergy_audit(
     # B. 风险模型加载与预测
     risk_pkg = joblib.load(risk_model_path)
     r_model, r_features = risk_pkg['model'], risk_pkg['features']
+    # 【数据口径修复】优先使用模型绑定的审计数据文件
+    if 'data_file' in risk_pkg and os.path.exists(risk_pkg['data_file']):
+        risk_data_path = risk_pkg['data_file']
+        logging.info(f"风险模型绑定数据: {risk_data_path}")
     risk_df = pd.read_csv(risk_data_path)
     risk_df['date'] = pd.to_datetime(risk_df['date'])
     risk_df['pred_risk'] = r_model.predict(risk_df[r_features])

@@ -1,28 +1,37 @@
 # -*- coding: utf-8 -*-
-import akshare as ak
+import os
 import pandas as pd
 
-def basic_screen():
-    try:
-        stocks_df = pd.read_excel( 
-            "sector2stocks_list.xlsx",
-            dtype = {'代码': str}
-        )
-    except FileNotFoundError:
-        print("未找到 sector2stocks_list.xlsx 文件，请先运行 get_base_data.py 获取基础数据。")
+def basic_screen(cache_dir='./stock_data_cache'):
+    """
+    100% 离线基础筛选函数：读取中证全指 (000985) 口径范围内的正股列表
+
+    统一经 LocalDataCache 读取元数据，禁止直连 SQLite。
+    """
+    from local_data_cache import LocalDataCache
+
+    ldc = LocalDataCache(cache_dir=cache_dir)
+    df = ldc.get_stock_meta()
+
+    if df.empty:
+        print("⚠️ 股票元数据表为空，请确认是否成功同步。")
         return []
 
-    common_screened = stocks_df[~stocks_df['名称'].str.contains('ST', case=False, na=True)].copy()
+    # 1. 剔除 code_name 为空的记录
+    df = df[df['code_name'].notna()].copy()
 
-    # 提取前缀用于判断板块
-    common_screened['prefix'] = common_screened['代码'].str[:3]  # 取前3位
-    # 剔除不需要的股票板块
-    exclude_prefixes = ['900', '200', '730']  # 沪市B股、深市B股、新股申购
+    # 2. 剔除带有 "ST" 或 "*ST" 标记的股票（大小写不敏感，与中证全指 000985 口径对齐）
+    common_screened = df[~df['code_name'].str.contains('ST', case=False, na=True)].copy()
+
+    # 3. 提取前缀用于判断板块，剔除不需要的板块
+    # 900: 沪市B股, 200: 深市B股, 730: 沪市新股申购
+    common_screened['prefix'] = common_screened['symbol'].str[:3]  # 取前3位
+    exclude_prefixes = ['900', '200', '730']
     common_screened = common_screened[~common_screened['prefix'].isin(exclude_prefixes)]
 
-    # common_screened = common_screened[~common_screened['代码'].astype(str).str.startswith('0', na=False)]
-
-    print(f"公共参数筛选后剩余 {len(common_screened)} 支股票")
-    stocks_list = common_screened['代码'].tolist()
+    # 4. 兼容性输出：原 excel 的"代码"列为不带前缀的 6 位数字
+    # 返回 symbol (如 ['600000', '000001'])，完美契合回测依赖，防止下游指标计算崩溃
+    stocks_list = common_screened['symbol'].tolist()
+    print(f"✨ 数据库筛选后剩余 {len(stocks_list)} 支有效 A 股股票")
 
     return stocks_list
