@@ -23,7 +23,6 @@ class FeatureConfig:
         'ema_turnover_vol', 'ema_turnover_max_res', 
         'ema_bias_norm', 'res_bias_norm',
         'acc_confirm', 'vp_diverg',
-        'rs_20', 'rs_60',
         'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
     ]
     BIZ_RISK_FEATURES = [
@@ -40,7 +39,6 @@ class FeatureConfig:
         'ema_bias_norm', 'res_bias_norm',
         'stock_congestion','high_vol_interaction','vp_corr_decay',
         'acc_confirm', 'vp_diverg',
-        'rs_20', 'rs_60',
         'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
     ]
 
