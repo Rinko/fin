@@ -3,11 +3,12 @@ stock_data_cache/
 __pycache__/
 financial_reports_cache/
 *.log
-
-# ---- 训练审计数据 CSV (10-15GB/个, 防止 gc 后产生巨大 pack) ----
+market_context_cache.parquet
+data_sync_history.csv
+financial_reports_all.csv
+global_strategy_audit.csv
 *_data.csv
 debug_inference_results.csv
-global_strategy_audit.csv
 
 # ---- 模型文件 (pkl 大, 用备份而非 git) ----
 *.pkl
