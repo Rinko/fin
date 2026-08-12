@@ -64,10 +64,20 @@ python check_trades.py                            # 交易复盘
 - `ml_check.py`（→ `audit/check_model_entry.py`）：入场模型审计（IC/top-k/特征重要性）
 - `ml_check_sell.py`（→ `audit/check_model_risk.py`）：风控模型审计 + 入场/风控协同
 - `audit/check_magnitude_model.py <pkl路径>`：**幅度模型审计**（MSE 压缩检测、日Z-score可用性）
-- `audit/check_data.py`：数据健壮性审计
-- `audit/check_screen.py`：海选漏斗审计
-- `audit/check_trades.py`：交易归因审计
+- `audit/check_data.py` / `check_base_data.py`：数据健壮性审计
+- `audit/check_screen.py` / `check_backtest.py`：海选漏斗审计
+- `audit/check_trades.py` / `check_trades.py`：交易归因审计
 - **审计发现 MSE 压缩（区分度低）时**：幅度模型预测值须做日 Z-score 标准化后才能用于阈值判断
+
+### 审计脚本分类
+| 类型 | 脚本 | 用途 |
+|---|---|---|
+| 模型审计 | `audit/check_model_entry.py` | 入场模型 IC/分箱/特征重要性/衰减 |
+| 模型审计 | `audit/check_model_risk.py` | 风控模型 + 入场/风控协同 |
+| 模型审计 | `audit/check_magnitude_model.py` | **幅度模型** MSE压缩/日Z-score/全量特征重要性 |
+| 数据/策略审计 | `audit/check_data.py` | 数据健壮性 (NaN/Inf/clip/物理边界) |
+| 数据/策略审计 | `audit/check_screen.py` | 海选漏斗 (6层穿透率/配额覆盖) |
+| 数据/策略审计 | `audit/check_trades.py` | 交易归因 (卖飞/摩擦/场景矩阵) |
 
 1. **PyBroker Logger Bug**：`backtest.py:40-49` 修补 PyBroker 源码拼写错误
 2. **Numba JIT**：首次运行慢
