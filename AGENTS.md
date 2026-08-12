@@ -59,7 +59,15 @@ python check_trades.py                            # 交易复盘
 - Z-score 标准化：每日横截面，clip(-3, 3)
 - 复合特征：`profit_bias_div_z` = 获利盘 z − 乖离 z（筹码锁定未透支）
 
-## 注意事项（踩坑记录）
+## 模型审计
+- **训练后必须审计**：任何模型训练完成后，立即运行对应审计脚本检查预测分布、IC、区分度
+- `ml_check.py`（→ `audit/check_model_entry.py`）：入场模型审计（IC/top-k/特征重要性）
+- `ml_check_sell.py`（→ `audit/check_model_risk.py`）：风控模型审计 + 入场/风控协同
+- `audit/check_magnitude_model.py <pkl路径>`：**幅度模型审计**（MSE 压缩检测、日Z-score可用性）
+- `audit/check_data.py`：数据健壮性审计
+- `audit/check_screen.py`：海选漏斗审计
+- `audit/check_trades.py`：交易归因审计
+- **审计发现 MSE 压缩（区分度低）时**：幅度模型预测值须做日 Z-score 标准化后才能用于阈值判断
 
 1. **PyBroker Logger Bug**：`backtest.py:40-49` 修补 PyBroker 源码拼写错误
 2. **Numba JIT**：首次运行慢
