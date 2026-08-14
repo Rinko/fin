@@ -3,6 +3,12 @@
 ## 项目概述
 中国 A 股量化选股系统，基于 LightGBM 的机器学习选股 + 市场状态检测。
 
+## 探索归档状态 (2026-08-14)
+- **所有历史探索已归档**, 新对话必读 → `ARCHIVE_SUMMARY.md` (项目根, 含目标 235.95%、各分支结论、已知 bug、归档清单)
+- 探索历史实体 → 外接盘 `external_data/archive_20260814/` (results/explore_night/models/task_queue/reports)
+- 归档 git tag → `archive/explore/*` (git tag 可恢复对应分支状态)
+- **历史最佳 235.95% 是 bug 态虚高** (mkt 因子恒 0.5 bug), 修复态真实基线 = **181.59%**
+
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
 - **所有大文件一律写外接盘**（审计 CSV、实验模型、回测结果），禁止写系统盘
