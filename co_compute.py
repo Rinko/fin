@@ -22,24 +22,22 @@ class FeatureConfig:
         'ema_cost_v',
         'ema_turnover_vol', 'ema_turnover_max_res', 
         'ema_bias_norm', 'res_bias_norm',
-        'acc_confirm', 'vp_diverg',
-        'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
+        'acc_confirm', 'vp_diverg'
     ]
     BIZ_RISK_FEATURES = [
-        'ema_profit', 'res_profit', 
-        'res_conc_90', 'ema_conc_70',      
-        'ema_conc_90_v',                   
-        'ema_peak_density',                
-        'dist_to_avg', 'dist_to_high90',   
+        'ema_profit', 'res_profit',
+        'res_conc_90', 'ema_conc_70',
+        'ema_conc_90_v',
+        'ema_peak_density',
+        'dist_to_avg', 'dist_to_high90',
         'ema_penetrate_up', 'ema_decay_dn',
         'ema_vol_stab', 'res_vol_stab',
         'ema_vp_corr', 'res_vp_corr',
         'ema_cost_v',
-        'ema_turnover_vol', 'ema_turnover_max_res', 
+        'ema_turnover_vol', 'ema_turnover_max_res',
         'ema_bias_norm', 'res_bias_norm',
-        'stock_congestion','high_vol_interaction','vp_corr_decay',
-        'acc_confirm', 'vp_diverg',
-        'turn_vol_mom', 'turn_vol_stab', 'turn_price_sync'
+        'stock_congestion', 'high_vol_interaction', 'vp_corr_decay',
+        'acc_confirm', 'vp_diverg'
     ]
 
     # 2. 大盘环境特征 (直接使用的列，不参与个股 Z-Score)
@@ -65,7 +63,7 @@ class FeatureConfig:
         composite = ['profit_bias_div_z']
         # 加上大盘特征
         return z_features + composite + cls.MKT_FEATURES + cls.RANK_FEATURES
-    
+
     @classmethod
     def get_risk_model_input_features(cls):
         # 个股特征全部带上 _z 后缀
@@ -1020,7 +1018,7 @@ def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_
         final_df['profit_bias_div_z'] = final_df['ema_profit_z'] - final_df['ema_bias_norm_z']
     else:
         final_df['profit_bias_div_z'] = 0.0
-   
+
     return final_df
 
 

@@ -260,7 +260,7 @@ class AccumulationTrainer:
     def run_global_training(self, start_date, warmup_days, train_end_date, val_end_date,
                             output_pkl='chip_accumulation_v6.pkl', symbols=None, max_stocks=None,
                             feature_contri_overrides=None, skip_audit_csv=False, mkt_contri=0.45,
-                            audit_dir=None):
+                            audit_dir='external_data/audit'):
         """
         全量模型训练流水线
 
@@ -273,8 +273,8 @@ class AccumulationTrainer:
             skip_audit_csv: 跳过导出 OOS 审计 CSV (滚动 fold 训练用, 每 fold 省 ~15GB 磁盘)
             mkt_contri: 大盘特征的 feature_contri 系数。默认 0.45 (抑制大盘因子)，
                         传 1.0 即关闭对大盘特征的降权 (让模型自主分配权重)。
-            audit_dir: 审计 CSV 输出目录。默认与 pkl 同目录 (旧行为)；
-                       建议传 external_data/audit (外接盘) 避免撑爆系统盘。
+            audit_dir: 审计 CSV 输出目录。默认 external_data/audit (外接盘)，
+                       避免 ~15GB 审计 CSV 撑爆系统盘。
                        存到 pkl 的 data_file 字段为绝对路径，ml_check 据此定位。
         """
         # 1. 准备大盘环境快照 (MarketData)
@@ -356,9 +356,10 @@ class AccumulationTrainer:
             global_data[m_col] = global_data['date'].map(mkt_context[m_col]).ffill().fillna(0.5)
 
         # 6. 目标值高斯化 (Gaussian Rank)
+        # 使用 method='average' 处理并列排名, 避免同分股票因 DataFrame 顺序被随机排序引入噪声
         logging.info("Step 4: 目标值高斯化变换...")
         global_data['target'] = global_data.groupby('date')['gpr_target'].transform(
-            lambda x: norm.ppf((x.rank(method='first') - 0.5) / (len(x) + 1e-9))
+            lambda x: norm.ppf((x.rank(method='average') - 0.5) / (len(x) + 1e-9))
         )
         
         # 7. 模型训练
@@ -425,7 +426,7 @@ class AccumulationTrainer:
     def run_global_sell_training(self, start_date, warmup_days, train_end_date, val_end_date,
                                  output_pkl='chip_risk_model_v1.pkl', symbols=None, max_stocks=None,
                                  feature_contri_overrides=None, skip_audit_csv=False, mkt_contri=0.45,
-                                 audit_dir=None):
+                                 audit_dir='external_data/audit'):
         """
         全量模型训练流水线
 
@@ -436,7 +437,8 @@ class AccumulationTrainer:
             feature_contri_overrides: 可选 dict {特征名: 贡献系数}，用于对特定特征降权。
             mkt_contri: 大盘特征的 feature_contri 系数。默认 0.45 (抑制大盘因子)，
                         传 1.0 即关闭对大盘特征的降权。
-            audit_dir: 审计 CSV 输出目录 (默认与 pkl 同目录)；建议传 external_data/audit。
+            audit_dir: 审计 CSV 输出目录。默认 external_data/audit (外接盘)，
+                       避免 ~15GB 审计 CSV 撑爆系统盘。
         """
         # 1. 准备大盘环境快照 (Market Context)
         # 这一步会扫描所有 DB 计算广度、拥挤度，并合并指数环境因子
@@ -516,9 +518,10 @@ class AccumulationTrainer:
             global_data[m_col] = global_data['date'].map(mkt_context[m_col]).ffill().fillna(0.5)
 
         # 6. 目标值高斯化 (Gaussian Rank)
+        # 使用 method='average' 处理并列排名, 避免大量无风险股票因 DataFrame 顺序被随机排序引入噪声
         logging.info("Step 4: 目标值高斯化变换...")
         global_data['target'] = global_data.groupby('date')['risk_score'].transform(
-            lambda x: norm.ppf((x.rank(method='first', ascending=False) - 0.5) / (len(x) + 1e-9))
+            lambda x: norm.ppf((x.rank(method='average', ascending=False) - 0.5) / (len(x) + 1e-9))
         )
         
         # 7. 模型训练
