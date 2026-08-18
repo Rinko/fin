@@ -795,11 +795,11 @@ def before_exec_fn(ctx_map):
         primary_scenario = mkt_status['primary_scenario']
 
         scenario_map = {
-            'opportunity': 0.02,  # 从 0.10 缩紧至 0.05 (只做前 5% 的硬主升标的)
-            'bottom': 0.03,       # 从 0.30 缩紧至 0.15 (精选前 15% 的超反弹性股)
-            'normal': 0.01,       # 从 0.05 缩紧至 0.03 (常态收缩，屏蔽 3-5% 的边缘损耗股)
-            'caution': 0.01,      # 从 0.05 缩紧至 0.03 (弱势收缩，屏蔽 3-5% 损耗股)
-            'risk': 0.01        
+            'opportunity': float(os.environ.get('ML_THRESH_OPPORTUNITY', '0.02')),
+            'bottom': float(os.environ.get('ML_THRESH_BOTTOM', '0.03')),
+            'normal': float(os.environ.get('ML_THRESH_NORMAL', '0.01')),
+            'caution': float(os.environ.get('ML_THRESH_CAUTION', '0.01')),
+            'risk': float(os.environ.get('ML_THRESH_RISK', '0.01')),
         }
         daily_ml_threshold = scenario_map[primary_scenario]
 
@@ -823,11 +823,11 @@ def before_exec_fn(ctx_map):
     elif 'bottom' in scenario:
         buy_quota = 5
     elif 'opportunity' in scenario:
-        buy_quota = 3
+        buy_quota = 5
     elif 'normal' in scenario:
-        buy_quota = 1
+        buy_quota = 5
     else:
-        buy_quota = 2
+        buy_quota = 5
 
     for symbol, ctx in ctx_map.items():
         if ctx.long_pos(): 

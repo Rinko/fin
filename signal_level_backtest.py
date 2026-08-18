@@ -157,6 +157,18 @@ def run(start_date, end_date, out_dir, capital_per_trade):
     trades_with_metric.to_excel(
         os.path.join(results_dir, 'signal_trades.xlsx'), index=False
     )
+
+    # 保存入场信号审计（含 bias/profit_ratio/ml_rank 等），供后续审计分析
+    if backtest.BUY_ELIGIBILITY_DETAILS:
+        entry_signals = pd.DataFrame(backtest.BUY_ELIGIBILITY_DETAILS)
+        entry_signals = entry_signals[entry_signals['is_eligible'] == True].copy()
+        entry_signals.rename(columns={'date': 'entry_date'}, inplace=True)
+        entry_signals['entry_date'] = pd.to_datetime(entry_signals['entry_date']).dt.date
+        entry_signals.to_csv(
+            os.path.join(results_dir, 'entry_signals.csv'), index=False, encoding='utf-8-sig'
+        )
+        print(f"✅ 入场信号审计: {os.path.join(results_dir, 'entry_signals.csv')}")
+
     print(f"\n✅ 结果目录: {results_dir}")
 
 

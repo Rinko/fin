@@ -30,6 +30,12 @@ try:
 except Exception:
     RISK_MAG_SELL_THRESHOLD = -0.03
 
+# 场景化 bias 阈值（探索用，单位与 ctx.bias_20 一致）
+BIAS_BOTTOM_THRESHOLD = float(os.environ.get('BIAS_BOTTOM_THRESHOLD', '0.0'))      # bottom: bias < threshold
+BIAS_OPPORTUNITY_THRESHOLD = float(os.environ.get('BIAS_OPPORTUNITY_THRESHOLD', '-0.05'))  # opportunity: bias > threshold
+BIAS_NORMAL_THRESHOLD = float(os.environ.get('BIAS_NORMAL_THRESHOLD', '0.05'))     # normal: bias > threshold
+USE_PROFIT_RATIO_CON = os.environ.get('USE_PROFIT_RATIO_CON', '0') == '1'
+
 
 # =========================================================================
 # 买入资格判断
@@ -80,6 +86,7 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     drop_from_top = (close / highest_price) - 1.0
     is_crashing = drop_from_top < -0.1
 
+    # 场景化条件（保留 profit_ratio_con 以便后续微调）
     profit_ratio_con = True
     bias_con = True
     profit_ratio_q20 = ctx.indicator('profit_ratio_q20')[-1]
@@ -87,26 +94,30 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     current_bias = ctx.bias_20[-1]
 
     if MODERATE_BUSINESS_RULES:
-        # 适度基线：不强制场景化 bias / profit_ratio 条件，由模型自己学习
+        # 适度基线：不强制场景化 bias 条件，由模型自己学习
         profit_ratio_con = True
         bias_con = True
     else:
         if 'bottom' in scenario:
-            bias_con = current_bias < 0
+            bias_con = current_bias < BIAS_BOTTOM_THRESHOLD
         elif 'opportunity' in scenario:
             profit_ratio_con = profit_ratio_ma3 > profit_ratio_q50
-            bias_con = current_bias > -0.05
+            bias_con = current_bias > BIAS_OPPORTUNITY_THRESHOLD
         elif 'normal' in scenario:
             profit_ratio_con = profit_ratio_ma3 > profit_ratio_q50
-            bias_con = current_bias > 0.05
+            bias_con = current_bias > BIAS_NORMAL_THRESHOLD
         elif 'caution' in scenario:
             # 谨慎场景暂不做额外约束
             pass
+
+    # 是否启用 profit_ratio_con（默认不启用，通过环境变量开启探索）
+    final_profit_ratio_con = profit_ratio_con if USE_PROFIT_RATIO_CON else True
 
     is_chip_ready = (
         getattr(ctx, 'is_profit_ok', False)[-1] and
         ml_rank < ml_threshold and
         bias_con and
+        final_profit_ratio_con and
         not daily_env['congestion_too_high']
     )
 
