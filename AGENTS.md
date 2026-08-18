@@ -7,7 +7,8 @@
 - **所有历史探索已归档**, 新对话必读 → `ARCHIVE_SUMMARY.md` (项目根, 含目标 235.95%、各分支结论、已知 bug、归档清单)
 - 探索历史实体 → 外接盘 `external_data/archive_20260814/` (results/explore_night/models/task_queue/reports)
 - 归档 git tag → `archive/explore/*` (git tag 可恢复对应分支状态)
-- **历史最佳 235.95% 是 bug 态虚高** (mkt 因子恒 0.5 bug), 修复态真实基线 = **181.59%**
+- **历史最佳 235.95% 是 bug 态虚高** (mkt 因子恒 0.5 bug); 修复态旧基线 = **181.59%**
+- **2026-08-18 新基线** (G_pca1_z + opport sizing + risk_mag, 区间 2021-01-02 ~ 2026-08-17): total_return=**152.38%**, sharpe=**1.23**, sortino=**1.53**, max_drawdown=**-19.95%**, trade_count=**1153**
 
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
@@ -28,11 +29,32 @@
 ```
 main.py → screen.py → backtest.py
                       ↓
+            signal_engine.py (买入/卖出/仓位规则)
             co_compute.py (特征工程)
             is_market_ok.py (市场状态)
             local_data_cache.py (SQLite 缓存)
             stock_fetcher_bao.py (BaoStock API)
+
+generate_signals.py      # 输出每日全量候选信号 CSV
+signal_level_backtest.py # 固定本金 per trade 评估模型+规则
 ```
+
+## 架构原则：训练与回测必须走 `co_compute.py` 公共模块
+
+- `co_compute.py` 是唯一的特征工程、标准化与目标生成入口。所有训练脚本、回测脚本、探索脚本必须使用：
+  - `co_compute.compute_individual_indicators` 生成个股特征
+  - `co_compute.apply_standardization` 做横截面 Z-Score
+  - `co_compute.FeatureConfig` 定义特征集合与市场特征口径
+  - `co_compute.sync_market_context_file` 生成 `market_context_cache.parquet`
+  - `co_compute.build_market_pca_table` 生成或加载大盘 PCA 特征
+- **严禁**在训练/回测脚本中：
+  - 手动读写项目根目录 `market_context_cache.parquet`
+  - monkeypatch `co_compute.build_market_pca_table` 或任何公共函数
+  - 内联重算筹码、标准化、GPR/risk target 等已由 `co_compute` 提供的逻辑
+- 若需使用预计算 PC 表（如 G_pca1_z），通过以下方式之一注册，确保训练与回测使用同一张表：
+  - 设置 `co_compute.FeatureConfig.PC_TABLE_PATH = '<path>.parquet'`
+  - 调用 `co_compute.sync_market_context_file(..., pc_table_path='<path>.parquet')`
+- 违反上述原则会导致训练与回测口径漂移，是模型/回测结果不可复现的主要根因。
 
 ## 常用命令
 ```bash
@@ -47,6 +69,9 @@ python check_trades.py                            # 交易复盘
 | 文件 | 用途 |
 |---|---|
 | `backtest.py` | 核心策略逻辑，PyBroker 回测框架 |
+| `signal_engine.py` | 纯信号规则层：买入资格、卖出判断、目标仓位 |
+| `generate_signals.py` | 每日全量候选信号 CSV 生成（无现金/无 quota） |
+| `signal_level_backtest.py` | 固定本金 per trade 信号级回测 |
 | `co_compute.py` | 筹码特征工程，横截面 Z-score 标准化 |
 | `market_ml.py` | LightGBM 训练流水线 |
 | `is_market_ok.py` | 四象限市场状态检测 |
@@ -60,8 +85,12 @@ python check_trades.py                            # 交易复盘
 4. **状态检测**：四象限（底部/机会/谨慎/正常/风险）
 
 ## ML 模型特征
-- 入场模型：29 特征（21 个股筹码 + 1 复合 + 7 大盘）— `chip_accumulation_v6_newfeat.pkl`
-- 风控模型：32 特征（24 个股筹码 + 1 复合 + 7 大盘）— `chip_risk_model_v1_newfeat.pkl`
+- 入场模型：23 特征（21 个股筹码 + 1 复合 + 1 大盘）— `chip_accumulation_v6_g_pca1_z.pkl`
+- 风控模型：24 特征（23 个股筹码 + 1 复合 + 1 大盘）— `chip_risk_model_v1_g_pca1_z.pkl`
+- 幅度模型：
+  - 机会幅度（超额收益）— `chip_opport_magnitude_excess_for_g.pkl`
+  - 风险幅度 — `chip_risk_magnitude_for_g.pkl`
+- 大盘特征：G_pca1_z 单主成分 `mkt_macro_regime`（`market_pca_g_pca1_z.parquet`）
 - Z-score 标准化：每日横截面，clip(-3, 3)
 - 复合特征：`profit_bias_div_z` = 获利盘 z − 乖离 z（筹码锁定未透支）
 
@@ -91,12 +120,12 @@ python check_trades.py                            # 交易复盘
 4. **BaoStock 会话**：错误码 10001001/10001002 时自动重连
 5. **特征双通道**：入场用平滑版（`use_smooth=True`），风控用原始版
 6. **前瞻约束**：`compute_individual_indicators` 特征只用当日收盘，交易设 `buy_delay>=1`
-7. **feature_contri**：LightGBM 4.6.0 `feature_contri` 真实参数，`gain[i]=max(0,contri[i])*gain[i]`，大盘特征设 0.45
-8. **市场环境对齐**：训练读 `market_context_cache.parquet`（`sync_market_context_file` 生成），回测实时算，每次数据同步后刷新 parquet
-9. **大盘特征降权不可动**：MKT_FEATURES 的 `feature_contri=0.45` 是必要正则化，mkt_contri=1.0 实验回测 -19.3pp + 回撤恶化
+7. **feature_contri**：LightGBM 4.6.0 `feature_contri` 真实参数，`gain[i]=max(0,contri[i])*gain[i]`。经最新实验，采用等权组合（所有特征 contri=1.0）替代手动调参，不再对大盘特征单独降权
+8. **市场环境对齐**：训练读 `market_context_cache.parquet`（`sync_market_context_file` 生成，支持 `pc_table_path` 注入预计算 PC），回测实时算，每次数据同步后刷新 parquet
+9. **大盘特征不再强制降权**：历史 `mkt_contri=0.45` 规则已失效；当前默认等权（contri=1.0），让模型自主分配市场/个股特征权重
 10. **PyBroker Warmup**：`start_date = 交易期起点 − warmup 个交易日`（用 zzqz_df.xlsx 交易日历），区间 < warmup 日数则不产生交易
 11. **Live Signal**：只在 `run_backtest` 结束后从末个交易日输出，区间短/股票池小可能无输出
-12. **模型加载**：`backtest.py` 默认加载旧模型，需 `backtest.reload_models()` 切换现役 `chip_accumulation_v6_newfeat.pkl`
+12. **模型加载**：`backtest.py` 默认加载旧模型，需 `backtest.reload_models()` 切换现役 `chip_accumulation_v6_g_pca1_z.pkl`，并通过 `backtest.load_magnitude_models()` 加载机会/风险幅度模型
 
 ## 缓存结构
 - `stock_data_cache/stock_data.db`：元数据 + 复权因子

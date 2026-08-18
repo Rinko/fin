@@ -20,7 +20,7 @@ class FeatureConfig:
         'ema_vol_stab', 'res_vol_stab',
         'ema_vp_corr', 'res_vp_corr',
         'ema_cost_v',
-        'ema_turnover_vol', 'ema_turnover_max_res', 
+        'ema_turnover_vol', 'ema_turnover_max_res',
         'ema_bias_norm', 'res_bias_norm',
         'acc_confirm', 'vp_diverg'
     ]
@@ -32,7 +32,7 @@ class FeatureConfig:
         'dist_to_avg', 'dist_to_high90',
         'ema_penetrate_up', 'ema_decay_dn',
         'ema_vol_stab', 'res_vol_stab',
-        'ema_vp_corr', 'res_vp_corr',
+        'ema_vp_corr',  # 风控通道不使用 res_vp_corr：raw 通道下 res_vp_corr = vp_corr - ema_vp_corr = 0
         'ema_cost_v',
         'ema_turnover_vol', 'ema_turnover_max_res',
         'ema_bias_norm', 'res_bias_norm',
@@ -41,10 +41,23 @@ class FeatureConfig:
     ]
 
     # 2. 大盘环境特征 (直接使用的列，不参与个股 Z-Score)
-    MKT_FEATURES = [
+    # 原始大盘列，用于计算复合特征和供给 is_market_ok / 个股动态窗口使用
+    MKT_RAW_FEATURES = [
         'mkt_trend', 'mkt_vol', 'mkt_liq', 'mkt_position',
         'congestion', 'high20_ratio', 'low20_ratio'
     ]
+    # 喂入模型的大盘特征：使用滚动 PCA 生成的 3 个正交、可解释的市场因子。
+    # 命名对应其主导业务含义，替代高度相关原始大盘列。
+    MKT_FEATURES = [
+        'mkt_macro_regime',      # 宏观/资金/趋势综合状态
+        'mkt_breadth_spread',    # 新高 vs 新低股的广度结构
+        'mkt_congestion_pressure' # 市场拥挤度/内部结构压力
+    ]
+
+    # 2.6 外部预计算 PCA 表路径。
+    # 实验/生产可通过该字段强制训练与回测使用同一张 PC 表，避免手动 merge parquet 或 monkeypatch。
+    # 为 None 时按默认逻辑从 MKT_RAW_FEATURES 实时计算。
+    PC_TABLE_PATH = None
 
     # 2.5 行业内分位特征 (横截面 rank, 天然 0~1, 无需 Z-Score, 不加权)
     # ind_inner_rank: 个股 rs_20 在所属申万一级行业内的分位排名 (个股级)
@@ -73,6 +86,192 @@ class FeatureConfig:
         # 加上大盘特征
         return z_features + composite + cls.MKT_FEATURES + cls.RANK_FEATURES
     
+# ==========================================
+# 大盘复合特征构造
+# ==========================================
+def add_market_composite_features(df):
+    """
+    从原始大盘特征构造复合特征，减少高相关市场因子对模型的分裂点占用。
+    要求 df 中已包含 MKT_RAW_FEATURES 列。
+    """
+    # 流动性/波动/仓位体制：三者高度相关，共同描述市场整体资金环境
+    df['mkt_liquidity_regime'] = df[['mkt_vol', 'mkt_liq', 'mkt_position']].mean(axis=1)
+    # 拥挤度 + 新高/新低广度：描述市场内部结构压力
+    df['mkt_breadth_stress'] = df[['congestion', 'high20_ratio', 'low20_ratio']].mean(axis=1)
+    return df
+
+
+def add_market_pca_features(df, n_components=3, min_periods=60):
+    """
+    基于原始大盘特征做滚动 PCA，生成 3 个具有业务可解释性的正交市场特征。
+
+    参数:
+    - df: 必须包含 'date' 列以及 FeatureConfig.MKT_RAW_FEATURES 列。
+    - n_components: 保留的主成分数（默认 3）。
+    - min_periods: 最少需要多少历史样本才开始估计 PCA。
+
+    说明:
+    - 每一天的 PC 仅使用当日之前的历史数据拟合，避免未来信息泄露。
+    - 符号按“载荷绝对值最大的原始特征为正”锚定，保证跨日期命名含义稳定。
+    - 返回 df 新增 mkt_macro_regime, mkt_breadth_spread, mkt_congestion_pressure 列。
+    """
+    cols = FeatureConfig.MKT_RAW_FEATURES
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"add_market_pca_features 缺少大盘列: {missing}")
+
+    df = df.sort_values('date').copy().reset_index(drop=True)
+    X = df[cols].ffill().fillna(0.0).values.astype(np.float64)
+    n = len(df)
+    pc_names = ['mkt_macro_regime', 'mkt_breadth_spread', 'mkt_congestion_pressure']
+    if n_components != len(pc_names):
+        pc_names = [f"mkt_pc{i+1}" for i in range(n_components)]
+    # 每个主成分按预设的经济含义锚定符号，使命名跨日期稳定
+    sign_anchors = ['mkt_trend', 'high20_ratio', 'congestion']
+    pcs = np.full((n, n_components), np.nan, dtype=np.float64)
+
+    for i in range(min_periods, n):
+        X_hist = X[:i]
+        if np.isnan(X_hist).any():
+            continue
+        mu = np.mean(X_hist, axis=0)
+        sigma = np.std(X_hist, axis=0)
+        sigma[sigma == 0] = 1.0
+        X_std = (X_hist - mu) / sigma
+        # 历史样本不足或特征维度不够时跳过
+        if X_std.shape[0] < n_components or X_std.shape[1] < n_components:
+            continue
+        try:
+            # 使用 SVD 手工实现 PCA，避免引入 sklearn 依赖
+            U, S, Vt = np.linalg.svd(X_std, full_matrices=False)
+            comps = Vt[:n_components, :].copy()  # (n_components, p)
+            # 符号对齐：按预设业务锚定列强制为正，确保
+            # mkt_macro_regime / mkt_breadth_spread / mkt_congestion_pressure
+            # 的经济含义在不同交易日保持一致。
+            for k in range(n_components):
+                if k < len(sign_anchors) and sign_anchors[k] in cols:
+                    anchor_idx = cols.index(sign_anchors[k])
+                else:
+                    anchor_idx = int(np.argmax(np.abs(comps[k])))
+                if comps[k, anchor_idx] < 0:
+                    comps[k] *= -1.0
+            x_cur = (X[i] - mu) / sigma
+            pcs[i] = x_cur @ comps.T
+        except np.linalg.LinAlgError:
+            continue
+
+    for k, name in enumerate(pc_names):
+        df[name] = pcs[:, k]
+    return df
+
+
+def build_market_pca_table(mkt_raw_df, min_periods=60, pc_table_path=None):
+    """
+    统一入口：生成 PCA 市场特征表。
+
+    参数:
+    - mkt_raw_df: 必须包含 'date' 列以及 FeatureConfig.MKT_RAW_FEATURES 列。
+    - min_periods: PCA 最小历史样本数（实时计算时使用）。
+    - pc_table_path: 外部预计算 PC 表路径。为 None 时优先读取
+      FeatureConfig.PC_TABLE_PATH；均未设置时按默认从 MKT_RAW_FEATURES 实时计算。
+      预计算表必须包含 'date' 列与 FeatureConfig.MKT_FEATURES 列。
+
+    返回:
+    - DataFrame，只含 ['date'] + FeatureConfig.MKT_FEATURES。
+    """
+    # 优先使用外部预计算 PC 表，确保训练/回测大盘特征口径一致
+    if pc_table_path is None:
+        pc_table_path = FeatureConfig.PC_TABLE_PATH
+
+    if pc_table_path is not None:
+        if not os.path.exists(pc_table_path):
+            raise FileNotFoundError(f"预计算 PC 表不存在: {pc_table_path}")
+        pc_df = pd.read_parquet(pc_table_path)
+        if 'date' not in pc_df.columns:
+            raise ValueError(f"预计算 PC 表缺少 'date' 列: {pc_table_path}")
+        pc_df['date'] = pd.to_datetime(pc_df['date'])
+        pc_cols = list(FeatureConfig.MKT_FEATURES)
+        missing = [c for c in pc_cols if c not in pc_df.columns]
+        if missing:
+            raise ValueError(f"预计算 PC 表缺少 MKT_FEATURES 列 {missing}: {pc_table_path}")
+        # 只保留输入日期所需的最小集合，避免依赖多余未来数据
+        df = mkt_raw_df[['date']].drop_duplicates().sort_values('date').reset_index(drop=True)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.merge(pc_df[['date'] + pc_cols], on='date', how='left')
+        if df[pc_cols].isna().all().any():
+            logging.warning("预计算 PC 表与输入日期存在交集缺失，对应 MKT_FEATURES 将填充 0")
+            df[pc_cols] = df[pc_cols].fillna(0.0)
+        return df
+
+    cols = FeatureConfig.MKT_RAW_FEATURES
+    missing = [c for c in cols if c not in mkt_raw_df.columns]
+    if missing:
+        raise ValueError(f"build_market_pca_table 缺少必要大盘列: {missing}")
+
+    df = mkt_raw_df.sort_values('date').copy().reset_index(drop=True)
+
+    # 业务中性填充：只有开头因无历史数据而缺失的少量行会被填充
+    fill_values = {
+        'mkt_trend': 0.5, 'mkt_vol': 0.5, 'mkt_liq': 0.5, 'mkt_position': 0.5,
+        'congestion': 0.35, 'high20_ratio': 0.1, 'low20_ratio': 0.1
+    }
+    for col in cols:
+        df[col] = df[col].ffill().fillna(fill_values.get(col, 0.5))
+
+    df = add_market_pca_features(
+        df, n_components=len(FeatureConfig.MKT_FEATURES), min_periods=min_periods
+    )
+
+    # 对 PCA 大盘特征做时间序列 Z-Score（只用历史数据，无未来信息）。
+    # 这样市场特征和个股 Z-Score 特征同尺度，等权 feature_contri 才公平。
+    for col in FeatureConfig.MKT_FEATURES:
+        pc = df[col]
+        mean = pc.expanding(min_periods=min_periods).mean().shift(1)
+        std = pc.expanding(min_periods=min_periods).std().shift(1)
+        std = std.replace(0, np.nan)
+        df[col] = ((pc - mean) / std).fillna(0.0).clip(-3, 3)
+
+    return df[['date'] + list(FeatureConfig.MKT_FEATURES)]
+
+
+def build_market_raw_z_table(mkt_raw_df, min_periods=60):
+    """
+    统一入口：对原始大盘特征各自做时间序列 Z-Score。
+
+    参数:
+    - mkt_raw_df: 必须包含 'date' 列以及 FeatureConfig.MKT_RAW_FEATURES 列。
+    - min_periods: 滚动/扩展统计最小样本数。
+
+    返回:
+    - DataFrame，只含 ['date'] + FeatureConfig.MKT_FEATURES（即 *_z 列）。
+    """
+    cols = FeatureConfig.MKT_RAW_FEATURES
+    missing = [c for c in cols if c not in mkt_raw_df.columns]
+    if missing:
+        raise ValueError(f"build_market_raw_z_table 缺少必要大盘列: {missing}")
+
+    df = mkt_raw_df.sort_values('date').copy().reset_index(drop=True)
+
+    fill_values = {
+        'mkt_trend': 0.5, 'mkt_vol': 0.5, 'mkt_liq': 0.5, 'mkt_position': 0.5,
+        'congestion': 0.35, 'high20_ratio': 0.1, 'low20_ratio': 0.1
+    }
+    for col in cols:
+        df[col] = df[col].ffill().fillna(fill_values.get(col, 0.5))
+
+    out_cols = []
+    for col in cols:
+        z_name = f"{col}_z"
+        s = df[col]
+        mean = s.expanding(min_periods=min_periods).mean().shift(1)
+        std = s.expanding(min_periods=min_periods).std().shift(1)
+        std = std.replace(0, np.nan)
+        df[z_name] = ((s - mean) / std).fillna(0.0).clip(-3, 3)
+        out_cols.append(z_name)
+
+    return df[['date'] + out_cols]
+
+
 # ==========================================
 # Numba 核心算子：动态可变窗口 EMA
 # ==========================================
@@ -568,13 +767,18 @@ def calculate_high_low_stats(stock_data, lookback_periods=[5, 10, 20, 60]):
 # ==========================================
 # 计算大盘广度、环境，合并，保存文件
 # ==========================================
-def sync_market_context_file(cache_dir, output_path='market_context_cache.parquet'):
+def sync_market_context_file(cache_dir, output_path='market_context_cache.parquet',
+                             pc_table_path=None):
     """
     扫描所有数据库，生成全市场环境因子（广度、拥挤度等）并持久化。
     使用 Parquet 格式，读取速度比 CSV 快 10 倍以上。
 
     统一经 LocalDataCache 读取（qfq 前复权，与 backtest 推理时的
     GLOBAL_MARKET_STATS 完全对齐），并对齐中证全指 (000985) 股票池口径。
+
+    参数:
+    - pc_table_path: 外部预计算 PCA 表路径。提供时，直接合并该表中的
+      FeatureConfig.MKT_FEATURES 列到输出，避免实验脚本手动覆盖项目根目录 parquet。
     """
     from local_data_cache import LocalDataCache
     from screen import basic_screen
@@ -608,8 +812,19 @@ def sync_market_context_file(cache_dir, output_path='market_context_cache.parque
     # 这样这张表就包含了“关于大盘的一切”
     mkt_factors = calculate_global_mkt_factors('zzqz_df.xlsx')
     final_context = mkt_breadth.merge(mkt_factors, on='date', how='left')
-    
-    # 4. 持久化
+
+    # 4. 生成/合并 PCA 正交大盘特征并持久化（统一走公共组件）
+    # 若提供外部 PC 表，先删除旧 MKT_FEATURES 列再合并，防止口径污染
+    if pc_table_path is not None:
+        for col in list(FeatureConfig.MKT_FEATURES):
+            if col in final_context.columns:
+                final_context = final_context.drop(columns=[col])
+    final_context = final_context.merge(
+        build_market_pca_table(final_context, min_periods=60, pc_table_path=pc_table_path),
+        on='date', how='left'
+    )
+
+    # 5. 持久化
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
     final_context.to_parquet(output_path)
@@ -729,15 +944,15 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
     turnover_rel = (t / t_mean_20).astype(np.float64)
     df['ema_turnover_vol'] = dynamic_ema(turnover_rel, w_slow)
 
-    # 组合特征: 换手率多维拆解 (turnover 主导地位分散)
-    # 1) turn_vol_mom: 换手率动量 (5日均量/20日均量 - 1, 捕捉短期放量趋势)
+    # --- 10.5 量能多维拆解组合特征 (历史探索 turn_vol_*) ---
+    # 1) turn_vol_mom: 换手率动量 (5日/20日均量 - 1)
     t_mean_5 = pd.Series(t).rolling(5, min_periods=1).mean().values + 1e-9
     df['turn_vol_mom'] = (t_mean_5 / t_mean_20 - 1.0).astype(np.float64)
-    # 2) turn_vol_stab: 换手率稳定性 (20日波动率的负向, 高=量能稳定)
+    # 2) turn_vol_stab: 换手率稳定性 (高=量能稳定)
     t_std_20 = pd.Series(t).rolling(20, min_periods=1).std().values
     t_std_20 = np.nan_to_num(t_std_20, nan=0.0)
     df['turn_vol_stab'] = -(t_std_20 / t_mean_20).astype(np.float64)
-    # 3) turn_price_sync: 量价同步 (换手率变化方向 × 价格变化方向, 量价共振=正)
+    # 3) turn_price_sync: 量价同步 (同向=+1, 反向=-1, 任一不动=0)
     t_ret = pd.Series(t).pct_change().fillna(0).values
     c_ret = pd.Series(c).pct_change().fillna(0).values
     df['turn_price_sync'] = (np.sign(t_ret) * np.sign(c_ret)).astype(np.float64)
@@ -806,11 +1021,51 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
     # --- 11. 全局数值防御 (返回前最后一步) ---
     # 将所有的 inf 替换为 0，防止标准化时崩溃
     df = df.replace([np.inf, -np.inf], np.nan)
-    
+
     # 其余特征大多以 0 为基准
     df = df.fillna(0.0)
 
     return df
+
+
+# ==========================================
+# 训练目标计算（公共入口，避免各训练脚本口径漂移）
+# ==========================================
+def compute_entry_target(df, window=20, eps=0.0001):
+    """
+    计算入场模型训练目标：Gain-to-Pain Ratio (GPR)。
+
+    返回在原始 df 上新增两列：
+    - target_val: 未来 window 日真实收益率（用于审计 PnL）
+    - gpr_target: 未来 window 日 GPR（用于训练目标）
+    """
+    if df.empty or 'close' not in df.columns:
+        return df
+    daily_ret = df['close'].pct_change(1)
+    df['target_val'] = df['close'].pct_change(window).shift(-window)
+    pos_rets = daily_ret.clip(lower=0)
+    neg_rets = daily_ret.clip(upper=0).abs()
+    f_pos_sum = pos_rets.rolling(window).sum().shift(-window)
+    f_neg_sum = neg_rets.rolling(window).sum().shift(-window)
+    df['gpr_target'] = f_pos_sum / (f_neg_sum + eps)
+    return df
+
+
+def compute_risk_target(df, hold_window=5):
+    """
+    计算风控模型训练目标：未来 hold_window 日最大日内跌幅（仅负值，已标准化）。
+
+    返回在原始 df 上新增一列 risk_score。
+    """
+    if df.empty or 'close' not in df.columns:
+        return df
+    daily_ret = df['close'].pct_change(1)
+    sigma = daily_ret.rolling(20).std()
+    f_max_loss = daily_ret.shift(-1).rolling(hold_window).min()
+    raw_risk = f_max_loss / (sigma + 0.005)
+    df['risk_score'] = raw_risk.clip(-5.0, 0.0)
+    return df
+
 
 # ==========================================
 # 标准化并整合输出
@@ -958,15 +1213,16 @@ def map_industry_rs(final_df, industry_map, ind_ret_table):
     return final_df
 
 
-def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_ret_table=None):
+def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_ret_table=None, features=None):
     """
     执行横截面 Z-Score 标准化及复合特征计算
-    
+
     参数:
     - final_df: 包含所有个股原始特征的合并 DataFrame，必须包含 'date' 列
     - industry_map: {symbol6位: 行业代码} 映射; 提供时计算行业内排名特征 ind_inner_rank
     - ind_rank_table: 行业排名表 (calculate_industry_rank_table 输出); 提供时映射 ind_rank_20/60
     - ind_ret_table: 行业收益表 (calculate_industry_ret_table 输出); 提供时映射 rs_ind_20/60
+    - features: 需要标准化的原始特征名列表。None 时使用 BIZ_FEATURES 与 BIZ_RISK_FEATURES 的并集。
     """
     if final_df.empty:
         return final_df
@@ -981,8 +1237,11 @@ def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_
     map_industry_rs(final_df, industry_map, ind_ret_table)
 
     # 1. 获取配置好的特征列表
-    biz_features = FeatureConfig.BIZ_RISK_FEATURES
-    
+    if features is None:
+        biz_features = list(dict.fromkeys(FeatureConfig.BIZ_FEATURES + FeatureConfig.BIZ_RISK_FEATURES))
+    else:
+        biz_features = features
+
     # 2. 预处理：数值防御
     # 替换无穷值，并对原始特征进行基础填充，防止 transform 失败
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
@@ -1015,7 +1274,7 @@ def apply_standardization(final_df, industry_map=None, ind_rank_table=None, ind_
     # 【业务含义】：筹码获利盘与价格乖离的背离程度
     # 如果获利盘极高（z极大）但乖离率并不高（z较小），则 div 很大，代表筹码高度锁定且未透支价格
     if 'ema_profit_z' in final_df.columns and 'ema_bias_norm_z' in final_df.columns:
-        final_df['profit_bias_div_z'] = final_df['ema_profit_z'] - final_df['ema_bias_norm_z']
+        final_df['profit_bias_div_z'] = (final_df['ema_profit_z'] - final_df['ema_bias_norm_z']).clip(-3, 3)
     else:
         final_df['profit_bias_div_z'] = 0.0
 

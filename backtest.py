@@ -31,6 +31,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
 from stock_fetcher_bao import BaostockCodeFetcher
 from local_data_cache import LocalDataCache
 import is_market_ok
+import signal_engine
 
 # =========================================================================
 # 运行时热修复：修复 PyBroker 官方源码中 info_loaded_bar_data 拼写逗号导致的错误
@@ -87,6 +88,40 @@ def reload_models(entry_pkl='chip_accumulation_v6.pkl', risk_pkl='chip_risk_mode
     trained_risk_lgbm = GLOBAL_RISK_MODEL_PKG['model']
     model_risk_features = GLOBAL_RISK_MODEL_PKG['features']
     print(f"模型已重载: {entry_pkl} + {risk_pkl}")
+
+# =========================================================================
+# 可选：幅度模型（探索用，不加载时不影响生产）
+# =========================================================================
+GLOBAL_OPPORT_MAG_PKG = None
+GLOBAL_RISK_MAG_PKG = None
+trained_opport_mag_lgbm = None
+opport_mag_features = None
+trained_risk_mag_lgbm = None
+risk_mag_features = None
+
+# 幅度模型 / 仓位系数实验参数（可通过环境变量调整，不影响未加载幅度模型的生产回测）
+BASE_TARGET_SIZE = float(os.environ.get('BASE_TARGET_SIZE', '0.05'))
+POS_MULT_WEIGHT = float(os.environ.get('POS_MULT_WEIGHT', '1.0'))
+POS_MULT_BIAS = float(os.environ.get('POS_MULT_BIAS', '0.0'))
+OPPORT_SIZING_COEFF = float(os.environ.get('OPPORT_SIZING_COEFF', '0.15'))
+OPPORT_SIZING_MIN = float(os.environ.get('OPPORT_SIZING_MIN', '0.5'))
+OPPORT_SIZING_MAX = float(os.environ.get('OPPORT_SIZING_MAX', '1.5'))
+
+def load_magnitude_models(opport_pkl=None, risk_pkl=None):
+    """热加载机会/风险幅度模型（可选）。"""
+    global GLOBAL_OPPORT_MAG_PKG, GLOBAL_RISK_MAG_PKG
+    global trained_opport_mag_lgbm, opport_mag_features
+    global trained_risk_mag_lgbm, risk_mag_features
+    if opport_pkl is not None:
+        GLOBAL_OPPORT_MAG_PKG = joblib.load(opport_pkl)
+        trained_opport_mag_lgbm = GLOBAL_OPPORT_MAG_PKG['model']
+        opport_mag_features = GLOBAL_OPPORT_MAG_PKG['features']
+        print(f"机会幅度模型已加载: {opport_pkl}")
+    if risk_pkl is not None:
+        GLOBAL_RISK_MAG_PKG = joblib.load(risk_pkl)
+        trained_risk_mag_lgbm = GLOBAL_RISK_MAG_PKG['model']
+        risk_mag_features = GLOBAL_RISK_MAG_PKG['features']
+        print(f"风险幅度模型已加载: {risk_pkl}")
 
 # pm = ProxyManager(config_file="./proxies.json")
 fetcher = BaostockCodeFetcher()
@@ -184,6 +219,14 @@ class AKShareChipDataSource(DataSource):
             # 'ma_squeeze_zscore', 'profit_ratio_zscore', 'price_to_cost_zscore',
             'ml_rank','risk_ml_rank'
         )
+        # 动态注册幅度模型列（若已加载）
+        extra_cols = []
+        if trained_opport_mag_lgbm is not None:
+            extra_cols.append('opport_mag')
+        if trained_risk_mag_lgbm is not None:
+            extra_cols.append('risk_mag')
+        if extra_cols:
+            pybroker.register_columns(*extra_cols)
 
     def _fetch_data(self, symbols, start_date, end_date, timeframe, adjust="qfq", online=False,
                     model_schedule=None):
@@ -212,6 +255,10 @@ class AKShareChipDataSource(DataSource):
         logging.info("Step 1: 准备大盘环境快照...")
         try:
             mkt_factors = co_compute.calculate_global_mkt_factors('zzqz_df.xlsx')
+            # FIX: 必须按日期索引，否则 df['date'].map(mkt_factors[col]) 会按 RangeIndex 映射全部失败
+            if mkt_factors is not None and 'date' in mkt_factors.columns:
+                mkt_factors['date'] = pd.to_datetime(mkt_factors['date'])
+                mkt_factors = mkt_factors.set_index('date')
         except Exception as e:
             logging.error(f"大盘数据加载失败: {e}")
             mkt_factors = None
@@ -255,6 +302,10 @@ class AKShareChipDataSource(DataSource):
                     fin_df = fin_df.rename(columns={'报告日期': 'date'})
                     fin_df['date'] = pd.to_datetime(fin_df['date'])
                     df = pd.merge_asof(df.sort_values('date'), fin_df.sort_values('date'), on='date', direction='backward')
+                    # FIX: 财务数据缺失时前向填充；仍缺失的用中性净资产 1.0，避免 NaN 污染 bp_ratio
+                    df['每股净资产'] = df['每股净资产'].ffill().bfill().fillna(1.0)
+                    df['is_profit_ok'] = df['is_profit_ok'].fillna(False).astype(bool)
+                    df['roe_up'] = df['roe_up'].fillna(0.0)
                     df['bp_ratio'] = (df['close'] / df['每股净资产'].replace(0, np.nan)).fillna(1.0)
                 else:
                     df['is_profit_ok'], df['roe_up'], df['bp_ratio'] = False, 0.0, 1.0
@@ -304,13 +355,35 @@ class AKShareChipDataSource(DataSource):
             raise
 
         # 映射大盘/环境列到两个数据流中 (确保两边基础环境一致)
-        mkt_cols = ['mkt_trend', 'mkt_vol', 'mkt_liq', 'mkt_position']
-        for df_temp in [final_df_smooth, final_df_raw]:
-            for col in mkt_cols:
-                df_temp[col] = df_temp['date'].map(mkt_factors[col]).ffill().fillna(0.5)
-            df_temp['congestion'] = df_temp['date'].map(GLOBAL_MARKET_STATS['congestion']).fillna(0.35)
-            df_temp['high20_ratio'] = df_temp['date'].map(GLOBAL_MARKET_STATS['high20_ratio']).fillna(0.1)
-            df_temp['low20_ratio'] = df_temp['date'].map(GLOBAL_MARKET_STATS['low20_ratio']).fillna(0.1)
+        # FIX: 使用 MKT_RAW_FEATURES 映射原始列，再生成 PCA 正交大盘特征喂入模型
+
+        # 先构建滚动 PCA 市场特征表（统一调用 co_compute 公共组件）
+        raw_cols = [c for c in co_compute.FeatureConfig.MKT_RAW_FEATURES]
+        mkt_raw_for_pca = GLOBAL_MARKET_STATS.reset_index()[['date'] + [c for c in raw_cols if c in GLOBAL_MARKET_STATS.columns]]
+        for col in raw_cols:
+            if col not in mkt_raw_for_pca.columns and mkt_factors is not None and col in mkt_factors.columns:
+                mkt_raw_for_pca[col] = mkt_raw_for_pca['date'].map(mkt_factors[col])
+        mkt_pc_df = co_compute.build_market_pca_table(mkt_raw_for_pca, min_periods=60)
+
+        def _attach_market_features(df_temp):
+            for col in raw_cols:
+                if col in mkt_factors.columns:
+                    mapped = df_temp['date'].map(mkt_factors[col])
+                else:
+                    mapped = df_temp['date'].map(GLOBAL_MARKET_STATS[col])
+                df_temp[col] = mapped.ffill()
+                if df_temp[col].isna().any():
+                    raise ValueError(f"大盘特征 {col} 存在无法映射的日期，请检查 mkt_factors 覆盖范围")
+            for col in ['congestion', 'high20_ratio', 'low20_ratio']:
+                if df_temp[col].isna().any():
+                    logging.warning(f"全局统计特征 {col} 存在 {df_temp[col].isna().sum()} 个 NaN，使用业务中性值填充")
+                    df_temp[col] = df_temp[col].fillna({'congestion': 0.35, 'high20_ratio': 0.1, 'low20_ratio': 0.1}.get(col))
+            # 合并 PCA 正交大盘特征
+            df_temp = df_temp.merge(mkt_pc_df, on='date', how='left')
+            return df_temp
+
+        final_df_smooth = _attach_market_features(final_df_smooth)
+        final_df_raw = _attach_market_features(final_df_raw)
 
         # ==========================================================
         # 3. 横截面标准化 (Z-Score) - 两个通道独立进行，防止特征值污染
@@ -362,6 +435,16 @@ class AKShareChipDataSource(DataSource):
             assert len(final_df_smooth) == len(final_df_raw), "平滑通道与原始通道行数不一致，对齐失败"
             final_df_smooth['risk_ml_score'] = final_df_raw['risk_ml_score'].values
 
+        # 3.5) 可选：幅度模型推理
+        if trained_opport_mag_lgbm is not None:
+            final_df_smooth['opport_mag'] = trained_opport_mag_lgbm.predict(
+                final_df_smooth[opport_mag_features]
+            )
+        if trained_risk_mag_lgbm is not None:
+            final_df_smooth['risk_mag'] = trained_risk_mag_lgbm.predict(
+                final_df_raw[risk_mag_features]
+            )
+
         # 4) 立即销毁原始通道数据，释放宝贵的内存空间
         del final_df_raw
         gc.collect()
@@ -394,10 +477,19 @@ class AKShareChipDataSource(DataSource):
         # ==========================================================
         registered_cols = [
             'symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'turnover',
-            'amount_ma20', 'close_ma20', 'profit_ratio', 'concentration_70', 
-            'chip_penetration', 'atr', 'atr_ratio', 'obv', 'vol_dryness', 'adx', 
+            'amount_ma20', 'close_ma20', 'profit_ratio', 'concentration_70',
+            'chip_penetration', 'atr', 'atr_ratio', 'obv', 'vol_dryness', 'adx',
             'bias_20', 'ma_squeeze', 'ml_rank', 'risk_ml_rank', 'is_profit_ok'
         ]
+        if trained_opport_mag_lgbm is not None:
+            registered_cols.append('opport_mag')
+            # 机会幅度的日度 Z-Score，用于个股仓位 sizing
+            final_df['opport_mag_z'] = final_df.groupby('date')['opport_mag'].transform(
+                lambda x: ((x - x.mean()) / (x.std() + 1e-9)).clip(-3, 3).fillna(0.0)
+            )
+            registered_cols.append('opport_mag_z')
+        if trained_risk_mag_lgbm is not None:
+            registered_cols.append('risk_mag')
         
         # 提取列并强制释放内存
         final_df = final_df[[c for c in registered_cols if c in final_df.columns]].copy()
@@ -671,147 +763,11 @@ def get_trend_signals(ctx, scenario):
     return bullish_divergence, tend_broke
 
 BUY_ELIGIBILITY_DETAILS = []
-# =========================================================================
-# 函数 2：【开仓漏斗】单只股票买入资格精筛与海选打分
-# =========================================================================
-def check_buy_eligibility_and_score(ctx, daily_env):
-    if len(ctx.close) < 90 or ctx.close[-1] <= 2:
-        return False, 0
-    
-    scenario = daily_env['primary_scenario']
-    day_limit = daily_env['day_limit']
-    liq_limit = day_limit['amount_ma20']
-    vol_limit = day_limit['atr_ratio']
-    
-    # 拦截成交额后 30% 且波动率比例后 20% 的僵尸死盘股，守住实盘滑点底线
-    is_active = (ctx.amount_ma20[-1] >= liq_limit) and (ctx.atr_ratio[-1] >= vol_limit)
-        
-    close = ctx.close[-1]
-    conc70 = ctx.concentration_70
-    conc70_q_low = ctx.indicator('conc70_q_low')
-    conc_down = ctx.indicator('conc_down')
-    # chip_penetration_q90 = ctx.indicator('chip_penetration_q90')
-    # chip_penetration_ok = ctx.chip_penetration > chip_penetration_q90
-    ml_threshold = daily_env.get('daily_ml_threshold', 0.15)
-    ml_rank = ctx.ml_rank[-1]
-    risk_ml_rank = ctx.risk_ml_rank[-1]
+# 买入资格与打分逻辑已迁移至 signal_engine.check_buy_eligibility_and_score
 
-    profit_ratio_ma3 = np.mean(ctx.profit_ratio[-3:]) if len(ctx.profit_ratio) >= 3 else ctx.profit_ratio[-1]
-    profit_ratio_threshold = ctx.indicator('profit_ratio_q20')[-1]
-    
-    # # 1. 根据大盘场景动态决定利润率门槛
-    # profit_ratio_threshold = 0.1
-    # if 'bottom' in scenario:
-    #     profit_ratio_threshold = min(profit_ratio_q20, 0.2)
-    # elif 'opportunity' in scenario:
-    #     profit_ratio_threshold = min(profit_ratio_q20, 0.15)
-        
-    # 2. 判断个股位置是否过高（90日分位数拦截）
-    # lookback_high = 90
-    # close_too_high_percentile = 0.92
-    # if len(ctx.close) > lookback_high:
-    #     close_too_high = close > np.quantile(ctx.close[-lookback_high:], close_too_high_percentile)
-    # else:
-    #     close_too_high = False
-
-    # 寻找过去的最低价作为参考底
-    close_min_90d = np.min(ctx.close[-90:])
-    # 如果当前价距离底部已经涨了超过 50%，认为已经进入“鱼尾”行情
-    gain_90d = (close / close_min_90d) - 1.0
-    close_too_high = gain_90d > 0.50
-
-    close_min_5d = np.min(ctx.close[-5:])
-    gain_5d = (close / close_min_5d) - 1.0
-    recent_surged = gain_5d > 0.10
-
-    highest_price = np.max(ctx.close[-5:])
-    drop_from_top = (close / highest_price) - 1.0
-    is_crashing = drop_from_top < -0.1
-    
-    profit_ratio_con = True
-    bias_con = True
-    profit_ratio_q20 = ctx.indicator('profit_ratio_q20')[-1]
-    profit_ratio_q50 = ctx.indicator('profit_ratio_q50')[-1]
-
-    current_bias = ctx.bias_20[-1]
-    
-    if 'bottom' in scenario:
-        # 抄底场景：强制要求在超跌、低获利的“冰点区”买入
-        # profit_ratio_con = profit_ratio_ma3 < profit_ratio_q20
-        bias_con = current_bias < 0
-    elif 'opportunity' in scenario:
-        # 突破场景：强制要求获利筹码必须过半（无上方套牢盘压头），拒绝假突破
-        profit_ratio_con = profit_ratio_ma3 > profit_ratio_q50
-        bias_con = current_bias > -0.05
-    elif 'normal' in scenario:
-        # 常态场景：避免买入筹码结构极差、深套的冷门股
-        profit_ratio_con = profit_ratio_ma3 > profit_ratio_q50
-        bias_con = current_bias > 0.05
-    elif 'caution' in scenario:
-        # 谨慎场景：只允许买入大资金抱团、高锁仓的防御性强势股
-        # profit_ratio_con = profit_ratio_ma3 < profit_ratio_q20
-        # bias_con = current_bias < 0
-        pass
-            
-    # 3. 筹码形态与个股基本面精筛
-    is_chip_ready = (
-        getattr(ctx, 'is_profit_ok', False)[-1] and
-        # conc70[-1] < conc70_q_low[-1] and               
-        ml_rank < ml_threshold and
-        # risk_ml_rank > 0.05 and
-        # conc_down[-10:].sum() >= 2 and
-        # not close_too_high and 
-        # not is_crashing and 
-        # not recent_surged and
-        # profit_ratio_con and
-        bias_con and
-        # chip_penetration_ok[-3:].sum() >= 1
-        not daily_env['congestion_too_high'] 
-    )
-    
-    # 4. 调用统一函数，获取个股趋势背离信号
-    # buy_signal_confirmed, _, _ = get_trend_signals(ctx, scenario)
-    
-    # 5. 大盘流动性环境强拦截
-    money_sig = daily_env.get('money_supply_signal', 1.0)
-    can_buy_in_this_market = True 
-    if not daily_env['is_market_ok'] or money_sig < 0.3:
-        can_buy_in_this_market = False
-        
-    # 6. 综合得出是否具备买入资格
-    # is_eligible = is_chip_ready and buy_signal_confirmed and can_buy_in_this_market
-    is_eligible = is_chip_ready and can_buy_in_this_market and is_active
-
-    # --- 3. 【关键：记录审计数据】 ---
-    # 为了节省内存，你可以选择只记录 is_active=True 的股票，或者记录全量
-    BUY_ELIGIBILITY_DETAILS.append({
-        'date': ctx.dt,
-        'symbol': ctx.symbol,
-        'ml_rank': ml_rank,
-        'ml_threshold': round(ml_threshold, 4),
-        'entry_bias': round(current_bias, 4),  
-        'profit_ratio_ma3':round(profit_ratio_ma3),
-        'amount_ma20': round(ctx.amount_ma20[-1], 0),
-        'liq_limit': round(liq_limit, 0),
-        'atr_ratio': round(ctx.atr_ratio[-1], 4),
-        'vol_limit': round(vol_limit, 4),
-        'gain_90d': round(gain_90d, 4),
-        'is_profit_ok': getattr(ctx, 'is_profit_ok', False)[-1],
-        'is_active': is_active,
-        'actual_liq_limit': liq_limit, # 新增：记录传入的拦截线到底是多大
-        'money_sig': money_sig,               # 新增：记录宏观信号
-        'can_buy_final': can_buy_in_this_market, # 新增：记录最终市场准入结果
-        'is_chip_ready': is_chip_ready,
-        'close_too_high': close_too_high,
-        'is_crashing': is_crashing,
-        'market_ok': daily_env['is_market_ok'],
-        'is_eligible': is_eligible
-    })
-
-    return is_eligible, ml_rank
 
 def before_exec_fn(ctx_map):
-    if not ctx_map: 
+    if not ctx_map:
         return
 
     first_ctx = next(iter(ctx_map.values()))
@@ -861,7 +817,10 @@ def before_exec_fn(ctx_map):
     daily_env = _daily_market_cache[current_dt]
     daily_candidates = []
     scenario = daily_env['primary_scenario']
-    if 'bottom' in scenario:  
+    quota_override = os.environ.get('BUY_QUOTA_OVERRIDE')
+    if quota_override is not None:
+        buy_quota = int(quota_override)
+    elif 'bottom' in scenario:
         buy_quota = 5
     elif 'opportunity' in scenario:
         buy_quota = 3
@@ -869,15 +828,17 @@ def before_exec_fn(ctx_map):
         buy_quota = 1
     else:
         buy_quota = 2
-    
+
     for symbol, ctx in ctx_map.items():
         if ctx.long_pos(): 
             continue
             
-        is_eligible, ml_rank = check_buy_eligibility_and_score(ctx, daily_env)
+        is_eligible, ml_rank, audit = signal_engine.check_buy_eligibility_and_score(ctx, daily_env)
+        BUY_ELIGIBILITY_DETAILS.append(audit)
         if is_eligible:
             daily_candidates.append((symbol, ml_rank))        
-    daily_candidates.sort(key=lambda x: x[1], reverse=True)
+    # ml_rank 是 pct rank(ascending=False)，越小代表模型打分越高，应升序取最头部
+    daily_candidates.sort(key=lambda x: x[1])
     daily_env['top_x_buys'] = set([x[0] for x in daily_candidates[:buy_quota]])
 
     if len(daily_candidates) > 0:
@@ -934,8 +895,16 @@ def chip_strategy(ctx):
         if symbol not in top_x_buys:
             return
 
-        target_size = 0.05 * (1 - ml_rank) * daily_env.get('position_multiplier', 1.0)
-        # target_size = 0.05 * ctx.position_multiplier
+        target_size = signal_engine.compute_target_size(
+            ctx, daily_env,
+            base_target_size=BASE_TARGET_SIZE,
+            pos_mult_weight=POS_MULT_WEIGHT,
+            pos_mult_bias=POS_MULT_BIAS,
+            opport_sizing_coeff=OPPORT_SIZING_COEFF,
+            opport_sizing_min=OPPORT_SIZING_MIN,
+            opport_sizing_max=OPPORT_SIZING_MAX,
+            trained_opport_mag_lgbm=trained_opport_mag_lgbm,
+        )
 
         # 限制 1：逆向计算 T+1 日的最大价格承载力（交集最小值）
         max_price_bias = ctx.close_ma20[-1] * 1.05                     # 防止 T+1 冲高变成加速追涨
@@ -950,143 +919,10 @@ def chip_strategy(ctx):
 
     # -------------------------------------------------------------------------
     elif position:
-        # 1. 基础信息与持仓状态计算
-        bars_held = position.bars
-        if bars_held < 1:
-            return
-        
-        # 计算成本与盈亏
-        total_cost = float(position.market_value - position.pnl)
-        shares = float(position.shares)
-        entry_price = total_cost / shares if shares > 0 else close
-        curr_pnl = float(position.pnl) / total_cost if total_cost > 0 else 0.0
-        
-        # 追踪持仓期最高收盘价
-        held_period_closes = ctx.close[-bars_held:]
-        highest_close = np.max(held_period_closes) if len(held_period_closes) > 0 else close
-        highest_pnl = (highest_close / entry_price) - 1.0
-        
-        should_sell = False
-        sell_reason = ""
-        risk_ml_crash = risk_ml_rank < dynamic_threshold
-        # --- 扁平化多级卖出决策链 ---
-        # if not should_sell and current_pnl_pct < 0.05:
-        #     if risk_ml_score_crash:
-        #         should_sell = True
-        #         sell_reason = "Low_Score"
-
-        # 【第一级：硬性止损 - 资金底线防护】
-        # if not should_sell:
-        #     # 股价跌破 2.0 * ATR 强行割肉
-        #     if close < entry_price - 2.0 * atr:
-        #         should_sell = True
-        #         sell_reason = "Hard_ATR_Stop_Loss"
-
-        # 【第二级：保本止盈 - 守护胜利果实】
-        # if not should_sell:
-        #     # 针对不同场景设置自适应利润保护线
-        #     if primary_scenario == 'opportunity':
-        #         # 针对高频快速、剧烈洗盘的主升场景，将保本保护触发门槛降低至 5% (消灭 80 笔主升电梯单)
-        #         if highest_pnl_pct > 0.05 and close <= entry_price * 1.01:
-        #             should_sell = True
-        #             sell_reason = "Break_Even_Protection"
-        #     else:
-        #         # 其他慢节奏场景维持 8% 保护线，留出宽幅波动空间
-        #         if highest_pnl_pct > 0.08 and close <= entry_price * 1.02:
-        #             should_sell = True
-        #             sell_reason = "Break_Even_Protection"
-
-        # # 【第三级：模型辅助软止损 - 弱势个股提前清仓】
-        # if not should_sell and close < entry_price:
-        #     if risk_ml_score_crash:
-        #         should_sell = True
-        #         sell_reason = "Loss_with_Very_Low_Score"
-
-        # # 【第四级：时间资本效率止损 - 释放套牢/横盘沉没成本】
-        # if not should_sell and bars_held >= 10:
-        #     # 持仓满 10 天，几乎没赚到钱（盈亏在 2% 以内），
-        #     if current_pnl_pct < 0.02 or risk_ml_score_crash:
-        #         should_sell = True
-        #         sell_reason = "Time_Capital_Efficiency"
-
-        # # 【第五级：动态追踪止盈 - 利润最大化】
-        # if not should_sell and current_pnl_pct > 0.05:
-        #     # 大利大空间（让利润奔跑），小利小空间（落袋为安）
-        #     high_profit = current_pnl_pct > 0.1
-        #     trailing_atr_mult = 2.5 if high_profit else 1.5
-            
-        #     if close < highest_close - trailing_atr_mult * atr:
-        #         should_sell = True
-        #         sell_reason = "Trailing_Stop_Profit"
-            
-        # # 【第六级：大趋势破裂与极端环境防守】
-        # if not should_sell:
-        #     env_scenario = daily_env.get('primary_scenario', 'neutral')
-        #     bullish_divergence, tend_broke = get_trend_signals(ctx, env_scenario)
-        #     if tend_broke and risk_ml_score_crash:
-        #         should_sell = True
-        #         sell_reason = "Major_Trend_Break_Or_Climax"
-
-        # --- 1. 风险模型：动态安全水位 (核心主导) ---
-        # 根据盈利情况，自动调整对风险的容忍度
-        if curr_pnl < 0:
-            # 亏损状态：对风险零容忍。只要风险进入前 10%，立刻止损保命
-            if risk_ml_rank < 0.1:
-                should_sell = True
-                sell_reason = "Negative_PnL_Risk_Preemption"
-        else:
-            # 获利状态：稍微宽容波动。风险进入前 5% 或 极速恶化时止盈
-            if risk_ml_rank < 0.05:
-                should_sell = True
-                sell_reason = "Profit_Protection_Risk"
-
-        # --- 2. 风险模型：边际恶化审计 (脉冲预警) ---
-        # 如果风险排名在 3 天内突然剧烈下降（例如从 0.8 掉到 0.2）
-        # 即使还没到 0.05，也说明微观结构崩了，先减仓或清仓
-        if not should_sell and bars_held >= 2:
-            risk_change = risk_ml_rank - ctx.risk_ml_rank[-2]
-            if risk_change < -0.25: # 风险排位剧烈下滑 40%
-                should_sell = True
-                sell_reason = "Risk_Sudden_Deterioration"
-
-            if not should_sell:
-                # 场景 A：已经给了足够时间 (8天)，但依然没赚到钱 (PnL < 1.5%)
-                # 审计显示此场景下 Alpha 依然会保持高分 (0.43%)，不能等 Alpha 掉，必须主动清仓
-                if bars_held >= 8 and curr_pnl < 0.015:
-                    should_sell = True
-                    sell_reason = "Time_Efficiency_Exit"
-                    
-                # 场景 B：未获利状态下的 Alpha 逻辑衰减
-                # 虽然 Alpha 很粘，但如果它真的掉出前 12%，说明全场有 600 只票比它好，没必要死守
-                # elif curr_pnl < 0.04 and ml_rank > 0.1:
-                #     should_sell = True
-                #     sell_reason = "Alpha_Logic_Fade"
-
-        if not should_sell and curr_pnl > 0.06:
-            # 利用 0.254 的获利单相关性：盈利后，只要 Alpha 还在前 25% 就值得拿
-            # 但如果 Alpha 掉出 25% 且触碰了移动止盈线，必须走
-            
-            # 动态 ATR 追踪
-            # 利润 > 10% 用 2.5倍 ATR (给牛股空间)；5%-10% 用 1.8倍 ATR
-            mult = 2.5 if curr_pnl > 0.10 else 1.8
-            if ml_rank < 0.01:
-                mult = 3  # 极度宽容，防止被洗掉
-            if close < highest_close - mult * atr:
-                should_sell = True
-                sell_reason = "Trailing_Stop_Profit"
-                
-            # # 盈利后的 Alpha 逻辑彻底瓦解 (由主升转入深调)
-            # elif ml_rank > 0.25:
-            #     should_sell = True
-            #     sell_reason = "Profit_Alpha_Collapse"
-
-
-        # --- 4. 极端场景补丁 ---
-        if not should_sell and daily_env['primary_scenario'] == 'risk':
-            # 如果大盘进入 RISK 场景，且个股已经不处于 Alpha 顶端
-            if ml_rank > 0.05:
-                should_sell = True
-                sell_reason = "Market_Risk_Clearance"
+        should_sell, sell_reason = signal_engine.evaluate_sell_signal(
+            ctx, daily_env, position,
+            trained_risk_mag_lgbm=trained_risk_mag_lgbm,
+        )
 
         if should_sell:
             limit_down = round(close * (1 - rate), 2)
@@ -1096,15 +932,22 @@ def chip_strategy(ctx):
             EXIT_SNAPSHOTS.append({
                 'symbol': ctx.symbol,
                 'exit_date': ctx.dt,
-                'sell_reason': sell_reason,  # 你定义的那个字符串
+                'sell_reason': sell_reason,
                 'exit_risk_ml_rank': risk_ml_rank,
-                'buy_limit_price': getattr(ctx, 'buy_limit_price', 0), # 回头查买入限价
-                'sell_limit_price': round(close * (1 - rate), 2) # 当前卖出限价
+                'buy_limit_price': getattr(ctx, 'buy_limit_price', 0),
+                'sell_limit_price': round(close * (1 - rate), 2)
             })
 
-
 def run_backtest(symbols, start_date=None, end_date=None, warmup=270, results_dir=None,
-                 model_schedule=None):
+                 model_schedule=None, initial_cash=1_000_000):
+    # FIX: 防止同进程多次调用时全局状态污染
+    global GLOBAL_MARKET_STATS, GLOBAL_SCREEN_THRESHOLDS, _daily_market_cache, BUY_ELIGIBILITY_DETAILS, EXIT_SNAPSHOTS
+    GLOBAL_MARKET_STATS = pd.DataFrame()
+    GLOBAL_SCREEN_THRESHOLDS = {}
+    _daily_market_cache.clear()
+    BUY_ELIGIBILITY_DETAILS.clear()
+    EXIT_SNAPSHOTS.clear()
+
     data_source = AKShareChipDataSource()
     
     if start_date is None:
@@ -1117,7 +960,7 @@ def run_backtest(symbols, start_date=None, end_date=None, warmup=270, results_di
         end_date = datetime.strptime(end_date, "%Y-%m-%d")
     
     config = StrategyConfig(
-        initial_cash=1000000,
+        initial_cash=initial_cash,
         fee_mode=FeeMode.ORDER_PERCENT,
         fee_amount=0.12,    
         enable_fractional_shares=False, 
