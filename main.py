@@ -121,7 +121,8 @@ def run_screening(trade_days, full):
     print(f"回测模式: {mode_desc}")
     print(f"回测区间: {start_date} ~ {end_date} (warmup={WARMUP_BARS} 交易日)")
 
-    results_dir = f"results/daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    suffix = os.environ.get('RESULTS_DIR_SUFFIX', '')
+    results_dir = f"results/daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
     backtest.run_backtest(
         symbols,
         start_date=start_date,

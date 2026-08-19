@@ -36,6 +36,13 @@ BIAS_OPPORTUNITY_THRESHOLD = float(os.environ.get('BIAS_OPPORTUNITY_THRESHOLD', 
 BIAS_NORMAL_THRESHOLD = float(os.environ.get('BIAS_NORMAL_THRESHOLD', '0.05'))     # normal: bias > threshold
 USE_PROFIT_RATIO_CON = os.environ.get('USE_PROFIT_RATIO_CON', '0') == '1'
 
+# ml_rank 下限（探索用）：部分场景下模型排名最靠前的股票因隔夜跳空导致入场价变差
+ML_RANK_FLOOR_BOTTOM = float(os.environ.get('ML_RANK_FLOOR_BOTTOM', '0.0'))
+ML_RANK_FLOOR_OPPORTUNITY = float(os.environ.get('ML_RANK_FLOOR_OPPORTUNITY', '0.0'))
+ML_RANK_FLOOR_NORMAL = float(os.environ.get('ML_RANK_FLOOR_NORMAL', '0.0'))
+ML_RANK_FLOOR_CAUTION = float(os.environ.get('ML_RANK_FLOOR_CAUTION', '0.0'))
+ML_RANK_FLOOR_RISK = float(os.environ.get('ML_RANK_FLOOR_RISK', '0.0'))
+
 
 # =========================================================================
 # 买入资格判断
@@ -70,6 +77,15 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     ml_threshold = daily_env.get('daily_ml_threshold', 0.15)
     ml_rank = ctx.ml_rank[-1]
     risk_ml_rank = ctx.risk_ml_rank[-1]
+
+    floor_map = {
+        'bottom': ML_RANK_FLOOR_BOTTOM,
+        'opportunity': ML_RANK_FLOOR_OPPORTUNITY,
+        'normal': ML_RANK_FLOOR_NORMAL,
+        'caution': ML_RANK_FLOOR_CAUTION,
+        'risk': ML_RANK_FLOOR_RISK,
+    }
+    ml_rank_floor = floor_map.get(scenario, 0.0)
 
     profit_ratio_ma3 = np.mean(ctx.profit_ratio[-3:]) if len(ctx.profit_ratio) >= 3 else ctx.profit_ratio[-1]
 
@@ -116,6 +132,7 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     is_chip_ready = (
         getattr(ctx, 'is_profit_ok', False)[-1] and
         ml_rank < ml_threshold and
+        ml_rank >= ml_rank_floor and
         bias_con and
         final_profit_ratio_con and
         not daily_env['congestion_too_high']

@@ -427,6 +427,27 @@ class AKShareChipDataSource(DataSource):
             model_input_features = [f for f in model_features]
             final_df_smooth['raw_ml_score'] = trained_lgbm.predict(final_df_smooth[model_input_features])
 
+            # 2.5) 可选：两阶段头部精排模型
+            # 先用一阶段模型粗筛每日 top 30%，再对 top 30% 用二阶段模型重新打分
+            stage2_model_pkl = os.environ.get('STAGE2_MODEL_PKL')
+            if stage2_model_pkl and os.path.exists(stage2_model_pkl):
+                stage2_pkg = joblib.load(stage2_model_pkl)
+                stage2_model = stage2_pkg['model']
+                stage2_features = [f for f in stage2_pkg['features']]
+                final_df_smooth['stage1_rank'] = final_df_smooth.groupby('date')['raw_ml_score'].rank(pct=True, ascending=False)
+                # 默认用一阶段分数；top 30% 替换为二阶段分数
+                final_df_smooth['final_ml_score'] = final_df_smooth['raw_ml_score']
+                mask_top30 = final_df_smooth['stage1_rank'] <= 0.30
+                if mask_top30.any():
+                    final_df_smooth.loc[mask_top30, 'final_ml_score'] = stage2_model.predict(
+                        final_df_smooth.loc[mask_top30, stage2_features]
+                    )
+                # 让后 70% 分数远低于 top 30%，确保 ml_rank 反映二阶段排序
+                bottom_min = final_df_smooth.loc[mask_top30, 'final_ml_score'].min() if mask_top30.any() else final_df_smooth['final_ml_score'].min()
+                final_df_smooth.loc[~mask_top30, 'final_ml_score'] = bottom_min - 10.0
+                final_df_smooth['raw_ml_score'] = final_df_smooth['final_ml_score']
+                final_df_smooth = final_df_smooth.drop(columns=['stage1_rank', 'final_ml_score'])
+
             # 2) 风险模型推理 (使用非平滑的脉冲敏感型特征输入)
             risk_model_input_features = [f for f in model_risk_features]
             final_df_raw['risk_ml_score'] = trained_risk_lgbm.predict(final_df_raw[risk_model_input_features])

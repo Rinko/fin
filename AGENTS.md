@@ -10,6 +10,7 @@
 - **历史最佳 235.95% 是 bug 态虚高** (mkt 因子恒 0.5 bug); 修复态旧基线 = **181.59%**
 - **2026-08-18 新基线** (G_pca1_z + opport sizing + risk_mag, 区间 2021-01-02 ~ 2026-08-17): total_return=**152.38%**, sharpe=**1.23**, sortino=**1.53**, max_drawdown=**-19.95%**, trade_count=**1153**
 - **2026-08-19 优化基线** (放宽每日 quota 至每场景 5 只后): total_return=**199.28%**, sharpe=**1.36**, sortino=**1.70**, max_drawdown=**-17.46%**, trade_count=**1412**
+- **2026-08-20 新基线** (opportunity/caution 场景加入 ml_rank_floor=0.005 后): total_return=**229.41%**, sharpe=**1.50**, sortino=**1.97**, max_drawdown=**-17.13%**, trade_count=**1353**
 
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）

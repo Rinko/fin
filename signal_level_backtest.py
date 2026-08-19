@@ -41,7 +41,7 @@ co_compute.FeatureConfig.PC_TABLE_PATH = os.path.join(
 import screen
 import backtest
 
-ENTRY_PKL = 'chip_accumulation_v6_g_pca1_z.pkl'
+ENTRY_PKL = os.environ.get('ENTRY_MODEL_PKL', 'chip_accumulation_v6_g_pca1_z.pkl')
 RISK_PKL = 'chip_risk_model_v1_g_pca1_z.pkl'
 OPPORT_PKL = 'chip_opport_magnitude_excess_for_g.pkl'
 RISKMAG_PKL = 'chip_risk_magnitude_for_g.pkl'
@@ -183,7 +183,11 @@ def main():
                         help='输出目录')
     parser.add_argument('--capital-per-trade', type=float, default=100_000,
                         help='每笔名义本金（仅用于指标计算）')
+    parser.add_argument('--entry-pkl', type=str, default=None,
+                        help='入口模型 pkl 路径（默认 chip_accumulation_v6_g_pca1_z.pkl）')
     args = parser.parse_args()
+    if args.entry_pkl:
+        os.environ['ENTRY_MODEL_PKL'] = args.entry_pkl
     run(args.start, args.end, args.out, args.capital_per_trade)
 
 
