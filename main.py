@@ -21,17 +21,40 @@ import subprocess
 import pandas as pd
 from datetime import datetime
 
+# =============================================================================
+# 最佳版本配置：G_pca1_z + opport_mag_excess sizing + risk_mag 硬止损
+# 必须在 import backtest 之前设置，因为 backtest.py 在导入时读取环境变量
+# =============================================================================
+os.environ['BASE_TARGET_SIZE'] = '0.12'
+os.environ['POS_MULT_WEIGHT'] = '0.5'
+os.environ['POS_MULT_BIAS'] = '0.5'
+os.environ['OPPORT_SIZING_COEFF'] = '0.30'
+os.environ['OPPORT_SIZING_MIN'] = '0.4'
+os.environ['OPPORT_SIZING_MAX'] = '1.8'
+os.environ['RISK_MAG_SELL_THRESHOLD'] = '-0.05'
+
+import co_compute
+
+# 与 G_pca1_z 对齐：单主成分 + 项目根目录预计算 PC 表
+co_compute.FeatureConfig.MKT_FEATURES = ['mkt_macro_regime']
+co_compute.FeatureConfig.PC_TABLE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'market_pca_g_pca1_z.parquet'
+)
+
 import screen
 import backtest
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 现役最优模型 (backtest.py 默认加载旧模型, 必须显式 reload)
-ENTRY_PKL = 'chip_accumulation_v6_newfeat.pkl'
-RISK_PKL = 'chip_risk_model_v1_newfeat.pkl'
+ENTRY_PKL = 'chip_accumulation_v6_g_pca1_z.pkl'
+RISK_PKL = 'chip_risk_model_v1_g_pca1_z.pkl'
+OPPORT_PKL = 'chip_opport_magnitude_excess_for_g.pkl'
+RISKMAG_PKL = 'chip_risk_magnitude_for_g.pkl'
 
 WARMUP_BARS = 270        # 与 backtest.py 一致
 FULL_START = '2021-01-02'  # 完整回测起点 (历史对比基准)
+BASELINE_END = '2026-08-17'  # 当前新基线截止日期
 
 
 def get_trading_calendar():
@@ -57,16 +80,20 @@ def sync_data():
         print("✅ 数据同步完成")
 
 
-def load_models(entry_pkl=ENTRY_PKL, risk_pkl=RISK_PKL):
+def load_models(entry_pkl=ENTRY_PKL, risk_pkl=RISK_PKL,
+                opport_pkl=OPPORT_PKL, riskmag_pkl=RISKMAG_PKL):
     """加载模型 (默认现役最优, 可传自定义)"""
     print("=" * 60)
     print("Step 2/3: 加载模型")
     print("=" * 60)
-    if not os.path.exists(entry_pkl) or not os.path.exists(risk_pkl):
-        print(f"❌ 模型缺失: {entry_pkl} / {risk_pkl}")
-        sys.exit(1)
+    for pkl in [entry_pkl, risk_pkl, opport_pkl, riskmag_pkl]:
+        if not os.path.exists(pkl):
+            print(f"❌ 模型缺失: {pkl}")
+            sys.exit(1)
     backtest.reload_models(entry_pkl, risk_pkl)
+    backtest.load_magnitude_models(opport_pkl, riskmag_pkl)
     print(f"✅ 模型已加载: {entry_pkl} + {risk_pkl}")
+    print(f"✅ 幅度模型已加载: {opport_pkl} + {riskmag_pkl}")
 
 
 def run_screening(trade_days, full):
@@ -88,12 +115,14 @@ def run_screening(trade_days, full):
         total_bars = WARMUP_BARS + trade_days
         start_date = trading_days_back(cal, total_bars).strftime('%Y-%m-%d')
         mode_desc = f"近 {trade_days} 交易日交易期 + {WARMUP_BARS} warmup"
-    end_date = datetime.now().strftime('%Y-%m-%d')
+    # 新基线统一使用 2026-08-17 作为结束日，确保与近期实验对齐
+    end_date = BASELINE_END
 
     print(f"回测模式: {mode_desc}")
     print(f"回测区间: {start_date} ~ {end_date} (warmup={WARMUP_BARS} 交易日)")
 
-    results_dir = f"results/daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    suffix = os.environ.get('RESULTS_DIR_SUFFIX', '')
+    results_dir = f"results/daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
     backtest.run_backtest(
         symbols,
         start_date=start_date,
