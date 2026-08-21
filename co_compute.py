@@ -24,6 +24,10 @@ class FeatureConfig:
         'ema_bias_norm', 'res_bias_norm',
         'acc_confirm', 'vp_diverg'
     ]
+
+    # 探索开关: 归档翻案组合特征 (CO_COMBO_FEATURES=1 启用, 不影响生产默认)
+    if os.environ.get('CO_COMBO_FEATURES', '0') == '1':
+        BIZ_FEATURES = BIZ_FEATURES + ['turn_vol_mom', 'turn_vol_stab', 'turn_price_sync']
     BIZ_RISK_FEATURES = [
         'ema_profit', 'res_profit',
         'res_conc_90', 'ema_conc_70',

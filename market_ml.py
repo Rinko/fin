@@ -141,7 +141,7 @@ class AccumulationTrainer:
 
                 # --- 计算 Target (GPR: Gain-to-Pain Ratio) ---
                 # 统一走 co_compute 公共入口，确保所有训练脚本口径一致
-                _kw = {'entry_price': 'open'}
+                _kw = {'entry_price': os.environ.get('ENTRY_PRICE_MODE', 'close')}
                 if os.environ.get('TARGET_EXCESS', '0') == '1':
                     _kw['mkt_ret'] = _load_mkt_ret()
                 df = co_compute.compute_entry_target(df, window=20, eps=0.0001, **_kw)
@@ -465,7 +465,8 @@ if __name__ == "__main__":
         warmup_days=400,
         train_end_date='2019-12-31',
         val_end_date='2020-12-31',
-        output_pkl=os.environ.get('TRAIN_OUTPUT_PKL', 'chip_accumulation_v6_open_entry.pkl')
+        output_pkl=os.environ.get('TRAIN_OUTPUT_PKL', 'chip_accumulation_v6_open_entry.pkl'),
+        skip_audit_csv=os.environ.get('SKIP_AUDIT_CSV', '0') == '1'
     )
     # 风控模型重训会覆盖生产 chip_risk_model_v1.pkl（经软链接），仅在显式要求时执行
     if os.environ.get('TRAIN_SELL', '0') == '1':
