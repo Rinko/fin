@@ -13,6 +13,10 @@ import warnings
 # 导入公共算子
 try:
     import co_compute 
+    # 与生产回测口径对齐：只使用单一 G_pca1_z 大盘特征
+    co_compute.FeatureConfig.MKT_FEATURES = ['mkt_macro_regime']
+    # 使用预计算单主成分表，避免 co_compute 在 1-component PCA 命名上的兼容性问题
+    co_compute.FeatureConfig.PC_TABLE_PATH = '/Volumes/MAC外接/fin_data/explore_night/pca_market_features_20260817/models/g_pca1_z_table.parquet'
 except ImportError:
     logging.error("无法加载 co_compute.py，请检查路径")
 
@@ -46,6 +50,19 @@ def _load_industry_rank_table(mkt_context):
     except Exception as e:
         logging.warning(f"行业排名表计算失败, ind_rank_20/60 将填中性值: {e}")
         return pd.DataFrame()
+
+
+_MKT_RET_CACHE = None
+
+
+def _load_mkt_ret():
+    """中证全指日收益（TARGET_EXCESS=1 时用于超额收益 target）。"""
+    global _MKT_RET_CACHE
+    if _MKT_RET_CACHE is None:
+        zz = pd.read_excel('zzqz_df.xlsx').rename(columns={'日期': 'date', '收盘': 'close'})
+        zz['date'] = pd.to_datetime(zz['date'])
+        _MKT_RET_CACHE = zz.set_index('date')['close'].pct_change()
+    return _MKT_RET_CACHE
 
 
 class AccumulationTrainer:
@@ -124,7 +141,10 @@ class AccumulationTrainer:
 
                 # --- 计算 Target (GPR: Gain-to-Pain Ratio) ---
                 # 统一走 co_compute 公共入口，确保所有训练脚本口径一致
-                df = co_compute.compute_entry_target(df, window=20, eps=0.0001)
+                _kw = {'entry_price': 'open'}
+                if os.environ.get('TARGET_EXCESS', '0') == '1':
+                    _kw['mkt_ret'] = _load_mkt_ret()
+                df = co_compute.compute_entry_target(df, window=20, eps=0.0001, **_kw)
 
                 # 仅保留训练实际开始日期后的数据，减少内存占用
                 df = df[df['date'] >= pd.to_datetime(actual_train_start)].copy()
@@ -144,6 +164,52 @@ class AccumulationTrainer:
         del all_dfs
         import gc
         gc.collect()
+
+        # 3.5 训练宇宙基础过滤（TRAIN_UNIVERSE_FILTER=1 启用）
+        # 与回测硬门槛对齐：股价>2、流动性/活跃度(后30%成交额+后20%波动率拦截)、财务盈利。
+        # 让模型只在可交易宇宙内学习排序，避免容量浪费在不可行动样本上。
+        if os.environ.get('TRAIN_UNIVERSE_FILTER', '0') == '1':
+            logging.info("Step 3.5: 训练宇宙基础过滤 (price>2 / liquidity / profit_ok)...")
+            n0 = len(global_data)
+            global_data = global_data[global_data['close'] > 2]
+            # 训练侧无现成 amount_ma20/atr_ratio，按回测同口径现算
+            g = global_data.sort_values(['symbol', 'date'])
+            grp = g.groupby('symbol', sort=False)
+            amt20 = grp['amount'].transform(lambda s: s.rolling(20, min_periods=1).mean())
+            pc = grp['close'].shift(1)
+            tr = np.maximum(g['high'] - g['low'],
+                            np.maximum((g['high'] - pc).abs(), (g['low'] - pc).abs()))
+            atr14 = tr.groupby(g['symbol'], sort=False).transform(
+                lambda s: s.rolling(14, min_periods=1).mean())
+            g = g.assign(_amt20=amt20.values, _atrr=(atr14 / g['close']).values)
+            liq_q = g.groupby('date')['_amt20'].quantile(0.30)
+            vol_q = g.groupby('date')['_atrr'].quantile(0.20)
+            keep = (g['_amt20'] >= g['date'].map(liq_q)) & \
+                   (g['_atrr'] >= g['date'].map(vol_q))
+            global_data = g[keep].drop(columns=['_amt20', '_atrr'])
+            fin_path = 'financial_reports_all.csv'
+            if os.path.exists(fin_path):
+                fin = pd.read_csv(
+                    fin_path,
+                    usecols=['股票代码', '报告日期', '净利润-净利润', '净利润-同比增长', '每股收益'],
+                    parse_dates=['报告日期'], dtype={'股票代码': 'str'})
+                fin = fin.dropna(subset=['报告日期'])
+                ok = (fin['净利润-净利润'] > 0) & (fin['净利润-同比增长'] > 0) & (fin['每股收益'] > 0)
+                fin = fin.loc[ok, ['股票代码', '报告日期']].copy()
+                fin['is_profit_ok'] = True
+                fin = fin.sort_values('报告日期').drop_duplicates(
+                    subset=['股票代码', '报告日期'], keep='last')
+                fin = fin.rename(columns={'股票代码': 'symbol', '报告日期': 'date'})
+                gd = global_data.sort_values('date')
+                merged = pd.merge_asof(gd, fin, on='date', by='symbol', direction='backward')
+                before = len(merged)
+                merged = merged[merged['is_profit_ok'].fillna(False)]
+                global_data = merged.drop(columns=['is_profit_ok']).reset_index(drop=True)
+                logging.info(f"  财务过滤: {before:,} -> {len(global_data):,}")
+            else:
+                logging.warning("  未找到 financial_reports_all.csv，跳过财务过滤")
+            global_data = global_data.reset_index(drop=True)
+            logging.info(f"  宇宙过滤完成: {n0:,} -> {len(global_data):,}")
 
         # 4. 执行截面标准化 (Z-Score)
         # 内部会自动根据 co_compute.FeatureConfig.BIZ_FEATURES 进行处理并计算背离特征
@@ -395,14 +461,17 @@ class AccumulationTrainer:
 if __name__ == "__main__":
     trainer = AccumulationTrainer()
     trainer.run_global_training(
-        start_date='2012-03-12', 
-        warmup_days=400, 
-        train_end_date='2019-12-31', 
-        val_end_date='2020-12-31'
+        start_date='2012-03-12',
+        warmup_days=400,
+        train_end_date='2019-12-31',
+        val_end_date='2020-12-31',
+        output_pkl=os.environ.get('TRAIN_OUTPUT_PKL', 'chip_accumulation_v6_open_entry.pkl')
     )
-    trainer.run_global_sell_training(
-        start_date='2012-03-12', 
-        warmup_days=400, 
-        train_end_date='2019-12-31', 
-        val_end_date='2020-12-31'
-    )
+    # 风控模型重训会覆盖生产 chip_risk_model_v1.pkl（经软链接），仅在显式要求时执行
+    if os.environ.get('TRAIN_SELL', '0') == '1':
+        trainer.run_global_sell_training(
+            start_date='2012-03-12',
+            warmup_days=400,
+            train_end_date='2019-12-31',
+            val_end_date='2020-12-31'
+        )

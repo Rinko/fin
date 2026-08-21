@@ -1,7 +1,6 @@
 # audit/check_model_entry.py
 # 入场模型综合审计 (原 ml_check.py)
-# 模型: 现役 chip_accumulation_v6_newfeat.pkl (29 特征), 审计数据优先用模型绑定 data_file
-# 可选 AUDIT_MAX_ROWS 环境变量: 只读前 N 行使快速冒烟测试
+# 全量流式读取（无行数截断），特征质量为全量精确统计；结果优先用模型绑定 data_file
 import os
 import joblib
 import pandas as pd
@@ -44,12 +43,66 @@ def _resolve_data_path(pkg, data_path):
     return data_path, False
 
 
-def _read_audit(data_path, usecols):
-    nrows = os.environ.get('AUDIT_MAX_ROWS')
-    kw = dict(usecols=usecols)
-    if nrows:
-        kw['nrows'] = int(nrows)
-    return pd.read_csv(data_path, **kw)
+def _stream_full_audit(data_path, model, features, split_date):
+    """全量流式读取审计数据：单次扫描、无行数截断，保证统计口径完整。
+
+    - 分块读取，仅保留必要列；
+    - 特征质量用全量精确累计量（非抽样）；
+    - 预测在块内完成，float32 降精度控内存。
+    返回 (eval_df 含 IS+OOS, feat_stats)
+    """
+    extra_cols = ['close', 'ema_bias_norm_z', 'res_bias_norm_z',
+                  'dist_to_high90_z', 'ema_profit_z']
+    all_cols = pd.read_csv(data_path, nrows=1).columns.tolist()
+    essential = ['date', 'target', 'target_val', 'symbol']
+    want = list(dict.fromkeys(
+        features + essential + [c for c in extra_cols if c in all_cols]))
+    missing_feat = [f for f in features if f not in all_cols]
+    if missing_feat:
+        raise RuntimeError(f"模型有 {len(missing_feat)} 个特征不在审计数据中: {missing_feat[:5]}")
+
+    feat_stats = {c: dict(n=0, nan=0, s=0.0, ss=0.0, mn=np.inf, mx=-np.inf)
+                  for c in features}
+    split_ts = pd.Timestamp(split_date)
+    parts = []
+    reader = pd.read_csv(data_path, usecols=want, chunksize=500_000)
+    for i, chunk in enumerate(reader):
+        chunk = chunk.replace([np.inf, -np.inf], np.nan)
+        for c in features:
+            s = chunk[c]
+            v = s.dropna().astype('float64')
+            st = feat_stats[c]
+            st['n'] += len(s)
+            st['nan'] += int(s.isna().sum())
+            if len(v):
+                st['s'] += float(v.sum())
+                st['ss'] += float(np.square(v).sum())
+                st['mn'] = min(st['mn'], float(v.min()))
+                st['mx'] = max(st['mx'], float(v.max()))
+        chunk = chunk.dropna(subset=features + ['target'])
+        if chunk.empty:
+            continue
+        dts = pd.to_datetime(chunk['date'], format='mixed', errors='coerce')
+        keep = dts.notna()
+        if not keep.any():
+            continue
+        sub = chunk.loc[keep].copy()
+        sub['date_dt'] = dts[keep]
+        sub['pred'] = model.predict(sub[features]).astype(np.float32)
+        keep_cols = ['date_dt', 'symbol', 'target', 'target_val', 'pred'] + \
+                    [c for c in ('close', 'ema_bias_norm_z', 'res_bias_norm_z',
+                                 'dist_to_high90_z', 'ema_profit_z') if c in sub.columns]
+        sub = sub[keep_cols]
+        for c in ('target', 'target_val', 'close', 'ema_bias_norm_z',
+                  'res_bias_norm_z', 'dist_to_high90_z', 'ema_profit_z'):
+            if c in sub.columns:
+                sub[c] = sub[c].astype(np.float32)
+        sub['symbol'] = sub['symbol'].astype('category')
+        parts.append(sub)
+        if (i + 1) % 10 == 0:
+            logging.info(f"  已流式处理 {(i + 1) * 500_000:,} 行...")
+    eval_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    return eval_df, feat_stats
 
 
 def _safe_ic_mean(series):
@@ -89,43 +142,34 @@ def run_comprehensive_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_D
     _log(f"模型: {model_path} | 特征数: {len(features)} | 数据: {data_path}")
 
     # ======================================================================
-    # 1. 特征质量审计 (抽样)
+    # 1+2. 全量流式加载 + 特征质量精确统计 + IS/OOS 表现
     # ======================================================================
-    _log("阶段 1: 特征质量抽样审计...")
-    all_cols = pd.read_csv(data_path, nrows=1).columns.tolist()
-    essential = ['date', 'target', 'target_val', 'symbol']
-    use_cols = [c for c in set(features + essential) if c in all_cols]
-    missing_feat = [f for f in features if f not in all_cols]
-    if missing_feat:
-        print(f"❌ FATAL: 模型有 {len(missing_feat)} 个特征不在审计数据中: {missing_feat[:5]}")
+    _log("阶段 1+2: 全量流式审计（无行数截断，特征质量为全量精确统计）...")
+    try:
+        eval_df, feat_stats = _stream_full_audit(
+            data_path, model, features, AuditConfig.split_date)
+    except RuntimeError as e:
+        print(f"❌ FATAL: {e}")
         return
-    df_sample = _read_audit(data_path, use_cols).replace([np.inf, -np.inf], np.nan)
-    n_sample = max(1000, int(len(df_sample) * AuditConfig.sample_frac))
-    df_sample = df_sample.sample(n_sample, random_state=42)
+    if eval_df.empty:
+        print("❌ 审计数据为空")
+        return
+    _log(f"全量加载完成: {len(eval_df):,} 行 (IS+OOS)")
+
     report = []
     for col in features:
-        d = df_sample[col].dropna()
-        report.append({'Feature': col, 'Mean': d.mean(), 'Std': d.std(),
-                       'NaN%': (df_sample[col].isna().sum() / len(df_sample)) * 100,
-                       'Min': d.min(), 'Max': d.max()})
-    print("\n" + "-" * 120 + f"\n{'1. 特征质量全局审计 (抽样)':^120}\n" + "-" * 120)
+        st = feat_stats[col]
+        n = max(st['n'], 1)
+        mean = st['s'] / n
+        var = max(st['ss'] / n - mean * mean, 0.0)
+        report.append({'Feature': col, 'Mean': mean, 'Std': np.sqrt(var),
+                       'NaN%': st['nan'] / n * 100,
+                       'Min': st['mn'] if np.isfinite(st['mn']) else np.nan,
+                       'Max': st['mx'] if np.isfinite(st['mx']) else np.nan})
+    print("\n" + "-" * 120 + f"\n{'1. 特征质量全局审计 (全量精确)':^120}\n" + "-" * 120)
     print(pd.DataFrame(report).to_string(index=False,
           formatters={'Mean': '{:.4f}'.format, 'Std': '{:.4f}'.format, 'NaN%': '{:.2f}%'.format}))
 
-    # ======================================================================
-    # 2. IS vs OOS 预测表现
-    # ======================================================================
-    _log("阶段 2: 预测表现审计 (全量读取)...")
-    eval_df = _read_audit(data_path, use_cols).replace([np.inf, -np.inf], np.nan)
-    eval_df = eval_df.dropna(subset=features + ['target'])
-    eval_df = eval_df.reset_index(drop=True)
-    if 'date' in eval_df.columns:
-        eval_df['date_dt'] = pd.to_datetime(eval_df['date'], format='mixed', errors='coerce')
-    else:
-        eval_df['date_dt'] = pd.NaT
-
-    _log("正在生成预测值...")
-    eval_df['pred'] = model.predict(eval_df[features])
     eval_df['is_oos'] = np.where(eval_df['date_dt'] < pd.Timestamp(AuditConfig.split_date),
                                  'In-Sample', 'Out-of-Sample')
 
@@ -209,8 +253,16 @@ def run_comprehensive_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_D
         b_stats = daily_b.groupby('bucket')[['target', 'target_val']].mean().T
         print(b_stats.to_string())
         if 'target' in b_stats.index:
-            mono = b_stats.loc['target'].dropna().is_monotonic_increasing
-            print(f"\n📈 OOS 分箱 target 是否单调递增: {mono} " + ("✅" if mono else "⚠️ 需检查 top-bin 是否被拉爆"))
+            b_mean = b_stats.loc['target'].dropna()
+            mono = b_mean.is_monotonic_increasing
+            step = b_mean.diff().dropna()
+            print(f"\n📈 OOS 分箱 target 单调递增: {mono} " + ("✅" if mono else "⚠️"))
+            if not mono and len(step):
+                worst_bin = int(step.idxmin())
+                spread = float(b_mean.iloc[-1] - b_mean.iloc[0])
+                print(f"   最大相邻倒挂: bin{worst_bin}→bin{worst_bin + 1} "
+                      f"幅度 {step.min():.4f} | top-bottom 极差 {spread:.4f} "
+                      f"(倒挂占比 {abs(step.min()) / (spread + 1e-9):.1%})")
         ls = daily_b[daily_b['bucket'] == 9].set_index('date_dt')['target_val'] - \
              daily_b[daily_b['bucket'] == 0].set_index('date_dt')['target_val']
         if len(ls):
@@ -333,7 +385,9 @@ def run_capacity_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_DATA):
     missing = [f for f in features if f not in all_cols]
     if missing:
         print(f"❌ FATAL: 数据缺特征 {missing[:5]}"); return
-    df = _read_audit(data_path, use_cols).replace([np.inf, -np.inf], np.nan).dropna(subset=features + ['target'])
+    df = pd.read_csv(data_path, usecols=use_cols).replace([np.inf, -np.inf], np.nan).dropna(subset=features + ['target'])
+    if 'change_pct' not in df.columns:
+        df['change_pct'] = np.nan
     df['date_dt'] = pd.to_datetime(df['date'], format='mixed', errors='coerce')
     _log("正在生成预测值...")
     df['pred'] = model.predict(df[features])
@@ -373,32 +427,39 @@ def run_capacity_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_DATA):
 
     # C. 20日重叠净值模拟
     print("\n" + "-" * 120 + f"\n{'3. 净值回撤 (20日持有期分仓模拟, Top20)':^120}\n" + "-" * 120)
-    pivot_ret = oos.pivot(index='date_dt', columns='symbol', values='daily_ret').fillna(0)
-    mask = oos.pivot(index='date_dt', columns='symbol', values='pred').rank(axis=1, ascending=False) <= 20
-    dates = pivot_ret.index
-    daily_strat = []
-    mv, rv = mask.values, pivot_ret.values
-    rev = len(dates)
-    for i in range(20, rev):
-        sub = []
-        for lag in range(20):
-            idx = mv[i - lag]
-            if idx.any():
-                sub.append(rv[i, idx].mean())
-        daily_strat.append(np.mean(sub) if sub else np.nan)
-    strat = pd.Series(daily_strat, index=dates[20:]).dropna()
-    net = strat - (avg_to * 2 * 0.0015)
-    nav = (1 + net).cumprod()
-    dd = (nav - nav.cummax()) / nav.cummax()
-    print(f"OOS 累计收益: {nav.iloc[-1]-1:.2%} | 最大回撤: {dd.min():.2%} | "
-          f"年化夏普: {(net.mean()*242)/(net.std()*np.sqrt(242)+1e-9):.2f}")
+    if oos['daily_ret'].isna().all():
+        print("⚠️ 审计数据无 change_pct 列，跳过净值模拟（A/B 换手与衰减结论不受影响）。")
+        strat = pd.Series(dtype=float)
+    else:
+        pivot_ret = oos.pivot(index='date_dt', columns='symbol', values='daily_ret').fillna(0)
+        mask = oos.pivot(index='date_dt', columns='symbol', values='pred').rank(axis=1, ascending=False) <= 20
+        dates = pivot_ret.index
+        daily_strat = []
+        mv, rv = mask.values, pivot_ret.values
+        rev = len(dates)
+        for i in range(20, rev):
+            sub = []
+            for lag in range(20):
+                idx = mv[i - lag]
+                if idx.any():
+                    sub.append(rv[i, idx].mean())
+            daily_strat.append(np.mean(sub) if sub else np.nan)
+        strat = pd.Series(daily_strat, index=dates[20:]).dropna()
+        net = strat - (avg_to * 2 * 0.0015)
+        nav = (1 + net).cumprod()
+        dd = (nav - nav.cummax()) / nav.cummax()
+        print(f"OOS 累计收益: {nav.iloc[-1]-1:.2%} | 最大回撤: {dd.min():.2%} | "
+              f"年化夏普: {(net.mean()*242)/(net.std()*np.sqrt(242)+1e-9):.2f}")
 
     # D. 盈亏平衡
     print("\n" + "-" * 120 + f"\n{'4. 盈亏持平点压力测试 (换手 Top100)':^120}\n" + "-" * 120)
-    avg_m = strat.mean()
-    for bps in [5, 15, 30]:
-        cost = avg_to * 2 * (bps / 10000)
-        print(f"单边摩擦 {bps:>2} bps | 每日净损益: {avg_m-cost:>8.4%} | 成本占比: {cost/avg_m:>6.2%}")
+    if strat.empty:
+        print("⚠️ 无净值序列，跳过盈亏平衡测试。")
+    else:
+        avg_m = strat.mean()
+        for bps in [5, 15, 30]:
+            cost = avg_to * 2 * (bps / 10000)
+            print(f"单边摩擦 {bps:>2} bps | 每日净损益: {avg_m-cost:>8.4%} | 成本占比: {cost/avg_m:>6.2%}")
 
     # E. 特征泄露
     print("\n" + "-" * 120 + f"\n{'5. 特征泄露自检 (特征与当日涨跌相关)':^120}\n" + "-" * 120)
