@@ -3,14 +3,15 @@
 ## 项目概述
 中国 A 股量化选股系统，基于 LightGBM 的机器学习选股 + 市场状态检测。
 
-## 探索归档状态 (2026-08-14)
-- **所有历史探索已归档**, 新对话必读 → `ARCHIVE_SUMMARY.md` (项目根, 含目标 235.95%、各分支结论、已知 bug、归档清单)
-- 探索历史实体 → 外接盘 `external_data/archive_20260814/` (results/explore_night/models/task_queue/reports)
-- 归档 git tag → `archive/explore/*` (git tag 可恢复对应分支状态)
-- **历史最佳 235.95% 是 bug 态虚高** (mkt 因子恒 0.5 bug); 修复态旧基线 = **181.59%**
-- **2026-08-18 新基线** (G_pca1_z + opport sizing + risk_mag, 区间 2021-01-02 ~ 2026-08-17): total_return=**152.38%**, sharpe=**1.23**, sortino=**1.53**, max_drawdown=**-19.95%**, trade_count=**1153**
-- **2026-08-19 优化基线** (放宽每日 quota 至每场景 5 只后): total_return=**199.28%**, sharpe=**1.36**, sortino=**1.70**, max_drawdown=**-17.46%**, trade_count=**1412**
-- **2026-08-20 新基线** (opportunity/caution 场景加入 ml_rank_floor=0.005 后): total_return=**229.41%**, sharpe=**1.50**, sortino=**1.97**, max_drawdown=**-17.13%**, trade_count=**1353**
+## 探索归档状态
+- **2026-08-14 前历史探索已归档**, 详见 `ARCHIVE_SUMMARY.md`
+- **2026-08-21 当前生产默认** (`explore/signal_level_backtest_20260818` 分支已合并至 main):
+  - 区间 2021-01-02 ~ 2026-08-17
+  - total_return=**229.41%**, sharpe=**1.50**, sortino=**1.97**, max_drawdown=**-17.13%**, trade_count=**1353**
+  - 关键规则：每场景 quota=5，`ML_RANK_FLOOR_OPPORTUNITY=0.005`, `ML_RANK_FLOOR_CAUTION=0.005`
+- 本轮已验证不可行：LambdaRank 各变体（单阶段/两阶段/截断/细粒度）、当前特征空间内的二阶头部质量模型
+- 探索实体与报告 → `external_data/explore_night/signal_level_backtest_20260818/`
+- 详细结论 → `external_data/explore_night/signal_level_backtest_20260818/exploration_summary_20260821.md`
 
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
@@ -57,6 +58,23 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
   - 设置 `co_compute.FeatureConfig.PC_TABLE_PATH = '<path>.parquet'`
   - 调用 `co_compute.sync_market_context_file(..., pc_table_path='<path>.parquet')`
 - 违反上述原则会导致训练与回测口径漂移，是模型/回测结果不可复现的主要根因。
+
+
+## 模型评估原则
+
+### 1. 用极简排名基准比较模型
+- 比较不同入场模型时，必须先过**极简排名基准**：保留 ST/股价/流动性/`is_profit_ok` 过滤，剥离场景阈值、floor、大盘过滤、所有卖出规则；
+- 每天按 `ml_rank` 取 top K，次日开盘买入，固定持有 20 天卖出；
+- 通过该基准后，再进入带规则的信号级/组合回测。避免业务规则偏袒某个模型。
+
+### 2. LambdaRank 已验证不可行
+- 在极简基准下，LambdaRank（单阶段/两阶段/截断/20 档细粒度）均显著低于 L2 回归基线；
+- 原因：GPR 排序目标与策略可实现收益存在结构性错位，且 LR 会制造“极少数 jackpot + 大量陷阱”的分数分布，不适合 quota 策略。
+
+### 3. 生产默认规则
+- `BUY_QUOTA_OVERRIDE=5`（每场景 5 只）；
+- `ML_RANK_FLOOR_OPPORTUNITY=0.005`, `ML_RANK_FLOOR_CAUTION=0.005`；
+- 其他场景 floor 默认 0.0。
 
 ## 常用命令
 ```bash

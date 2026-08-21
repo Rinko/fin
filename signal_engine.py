@@ -36,11 +36,13 @@ BIAS_OPPORTUNITY_THRESHOLD = float(os.environ.get('BIAS_OPPORTUNITY_THRESHOLD', 
 BIAS_NORMAL_THRESHOLD = float(os.environ.get('BIAS_NORMAL_THRESHOLD', '0.05'))     # normal: bias > threshold
 USE_PROFIT_RATIO_CON = os.environ.get('USE_PROFIT_RATIO_CON', '0') == '1'
 
-# ml_rank 下限（探索用）：部分场景下模型排名最靠前的股票因隔夜跳空导致入场价变差
+# ml_rank 下限：在 opportunity / caution 场景下，剔除模型排名最靠前的 0.5% 候选，
+# 避免买入过度自信/隔夜跳空变差的边际头部。经验验证 floor=0.005 在 2021-2026 回测中
+# 将 opport/caution 平均收益从 1.07%/0.28% 提升到 1.21%/0.45%。
 ML_RANK_FLOOR_BOTTOM = float(os.environ.get('ML_RANK_FLOOR_BOTTOM', '0.0'))
-ML_RANK_FLOOR_OPPORTUNITY = float(os.environ.get('ML_RANK_FLOOR_OPPORTUNITY', '0.0'))
+ML_RANK_FLOOR_OPPORTUNITY = float(os.environ.get('ML_RANK_FLOOR_OPPORTUNITY', '0.005'))
 ML_RANK_FLOOR_NORMAL = float(os.environ.get('ML_RANK_FLOOR_NORMAL', '0.0'))
-ML_RANK_FLOOR_CAUTION = float(os.environ.get('ML_RANK_FLOOR_CAUTION', '0.0'))
+ML_RANK_FLOOR_CAUTION = float(os.environ.get('ML_RANK_FLOOR_CAUTION', '0.005'))
 ML_RANK_FLOOR_RISK = float(os.environ.get('ML_RANK_FLOOR_RISK', '0.0'))
 
 
