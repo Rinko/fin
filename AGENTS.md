@@ -8,7 +8,7 @@
 - **2026-08-21 当前生产默认** (`explore/signal_level_backtest_20260818` 分支已合并至 main):
   - 区间 2021-01-02 ~ 2026-08-17
   - total_return=**229.41%**, sharpe=**1.50**, sortino=**1.97**, max_drawdown=**-17.13%**, trade_count=**1353**
-  - 关键规则：每场景 quota=5，`ML_RANK_FLOOR_OPPORTUNITY=0.005`, `ML_RANK_FLOOR_CAUTION=0.005`
+  - 关键规则：每场景 quota=5；floor 默认关闭（0.0，可选 0.005 待验证）
 - 本轮已验证不可行：LambdaRank 各变体（单阶段/两阶段/截断/细粒度）、当前特征空间内的二阶头部质量模型
 - 探索实体与报告 → `external_data/explore_night/signal_level_backtest_20260818/`
 - 详细结论 → `external_data/explore_night/signal_level_backtest_20260818/exploration_summary_20260821.md`
@@ -73,8 +73,8 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
 
 ### 3. 生产默认规则
 - `BUY_QUOTA_OVERRIDE=5`（每场景 5 只）；
-- `ML_RANK_FLOOR_OPPORTUNITY=0.005`, `ML_RANK_FLOOR_CAUTION=0.005`；
-- 其他场景 floor 默认 0.0。
+- floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
+- 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
 
 ## 常用命令
 ```bash
