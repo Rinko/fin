@@ -474,5 +474,7 @@ if __name__ == "__main__":
             start_date='2012-03-12',
             warmup_days=400,
             train_end_date='2019-12-31',
-            val_end_date='2020-12-31'
+            val_end_date='2020-12-31',
+            output_pkl=os.environ.get('TRAIN_SELL_OUTPUT_PKL', 'chip_risk_model_v1.pkl'),
+            skip_audit_csv=os.environ.get('SKIP_AUDIT_CSV', '0') == '1'
         )
