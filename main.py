@@ -56,7 +56,7 @@ RISKMAG_PKL = os.environ.get('RISKMAG_PKL', 'chip_risk_magnitude_for_g.pkl')
 
 WARMUP_BARS = 270        # 与 backtest.py 一致
 FULL_START = '2021-01-02'  # 完整回测起点 (历史对比基准)
-BASELINE_END = '2026-08-17'  # 当前新基线截止日期
+BASELINE_END = os.environ.get('BASELINE_END', '2026-08-17')  # 当前新基线截止日期
 
 
 def get_trading_calendar():

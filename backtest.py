@@ -842,11 +842,15 @@ def before_exec_fn(ctx_map):
     if quota_override is not None:
         buy_quota = int(quota_override)
     elif 'bottom' in scenario:
-        buy_quota = 5
+        buy_quota = int(os.environ.get('BUY_QUOTA_BOTTOM', '5'))
     elif 'opportunity' in scenario:
-        buy_quota = 5
+        buy_quota = int(os.environ.get('BUY_QUOTA_OPPORTUNITY', '5'))
     elif 'normal' in scenario:
-        buy_quota = 5
+        buy_quota = int(os.environ.get('BUY_QUOTA_NORMAL', '5'))
+    elif 'caution' in scenario:
+        buy_quota = int(os.environ.get('BUY_QUOTA_CAUTION', '5'))
+    elif 'risk' in scenario:
+        buy_quota = int(os.environ.get('BUY_QUOTA_RISK', '5'))
     else:
         buy_quota = 5
 
