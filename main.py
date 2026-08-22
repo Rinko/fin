@@ -129,6 +129,7 @@ def run_screening(trade_days, full):
         end_date=end_date,
         warmup=WARMUP_BARS,
         results_dir=results_dir,
+        initial_cash=float(os.environ.get('INITIAL_CASH', '1000000')),
     )
     print(f"结果目录: {results_dir}")
 
