@@ -207,11 +207,13 @@ def compute_target_size(ctx, daily_env,
     position_multiplier = daily_env.get('position_multiplier', 1.0)
     target_size = base_target_size * (pos_mult_bias + pos_mult_weight * position_multiplier)
 
-    # 机会幅度模型调整个股仓位
-    opport_mag_z = getattr(ctx, 'opport_mag_z', None)
-    if trained_opport_mag_lgbm is not None and opport_mag_z is not None:
-        val = opport_mag_z[-1] if isinstance(opport_mag_z, (list, np.ndarray)) else opport_mag_z
-        sizing_factor = 1.0 + opport_sizing_coeff * float(val)
+    # 机会幅度模型调整仓位（方案B）：直接消费原始超额收益(小数)，按 hurdle 归一，
+    # 预测越超门槛仓位越大、为负则缩仓——保留绝对幅度语义，不做 z 化。
+    opport_mag = getattr(ctx, 'opport_mag', None)
+    if trained_opport_mag_lgbm is not None and opport_mag is not None:
+        val = float(opport_mag[-1]) if isinstance(opport_mag, (list, tuple, np.ndarray)) else float(opport_mag)
+        hurdle = max(float(os.environ.get('OPPORT_HURDLE', '0.02')), 1e-4)
+        sizing_factor = 1.0 + opport_sizing_coeff * (val / hurdle)
         sizing_factor = max(opport_sizing_min, min(opport_sizing_max, sizing_factor))
         target_size *= sizing_factor
 
