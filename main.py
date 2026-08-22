@@ -25,7 +25,9 @@ from datetime import datetime
 # 最佳版本配置：G_pca1_z + opport_mag_excess sizing + risk_mag 硬止损
 # 必须在 import backtest 之前设置，因为 backtest.py 在导入时读取环境变量
 # =============================================================================
-os.environ['BASE_TARGET_SIZE'] = '0.12'
+# 仓位基准：0.12 曾导致并发市值达权益的 ~2.9 倍、现金约束在 >50% 交易日拒单；
+# 降至 0.04 后峰值占用 ≈0.98×权益，quota 内信号可全部成交（INITIAL_CASH 维持 1M 口径不变）
+os.environ['BASE_TARGET_SIZE'] = os.environ.get('BASE_TARGET_SIZE', '0.04')
 os.environ['POS_MULT_WEIGHT'] = '0.5'
 os.environ['POS_MULT_BIAS'] = '0.5'
 os.environ['OPPORT_SIZING_COEFF'] = '0.30'
