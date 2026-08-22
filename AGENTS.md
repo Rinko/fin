@@ -12,6 +12,8 @@
 - 本轮已验证不可行：LambdaRank 各变体（单阶段/两阶段/截断/细粒度）、当前特征空间内的二阶头部质量模型
 - 探索实体与报告 → `external_data/explore_night/signal_level_backtest_20260818/`
 - 详细结论 → `external_data/explore_night/signal_level_backtest_20260818/exploration_summary_20260821.md`
+- 2026-08-22 open-entry target 线索关闭：Gate1 同执行口径面板全维度落后（含2026年崩坏），代码开关保留于 `explore/open_entry_target_20260821`
+- 2026-08-22 combo3(turn_vol_mom/stab/price_sync) 重试：审计最优(RankIC 0.105/单调✅)但 Gate2 无floor 191%<基线199%、DD更深，未采纳；开关 `CO_COMBO_FEATURES` 保留
 
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
