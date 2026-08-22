@@ -51,8 +51,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # 现役最优模型 (backtest.py 默认加载旧模型, 必须显式 reload)
 ENTRY_PKL = 'chip_accumulation_v6_g_pca1_z.pkl'
 RISK_PKL = 'chip_risk_model_v1_g_pca1_z.pkl'
-OPPORT_PKL = 'chip_opport_magnitude_excess_for_g.pkl'
-RISKMAG_PKL = 'chip_risk_magnitude_for_g.pkl'
+OPPORT_PKL = os.environ.get('OPPORT_PKL', 'chip_opport_magnitude_excess_for_g.pkl')
+RISKMAG_PKL = os.environ.get('RISKMAG_PKL', 'chip_risk_magnitude_for_g.pkl')
 
 WARMUP_BARS = 270        # 与 backtest.py 一致
 FULL_START = '2021-01-02'  # 完整回测起点 (历史对比基准)
