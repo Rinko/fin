@@ -24,6 +24,10 @@ class FeatureConfig:
         'ema_bias_norm', 'res_bias_norm',
         'acc_confirm', 'vp_diverg'
     ]
+
+    # 探索开关: 归档翻案组合特征 (CO_COMBO_FEATURES=1 启用, 不影响生产默认)
+    if os.environ.get('CO_COMBO_FEATURES', '0') == '1':
+        BIZ_FEATURES = BIZ_FEATURES + ['turn_vol_mom', 'turn_vol_stab', 'turn_price_sync']
     BIZ_RISK_FEATURES = [
         'ema_profit', 'res_profit',
         'res_conc_90', 'ema_conc_70',
@@ -1031,9 +1035,16 @@ def compute_individual_indicators(df, mkt_factors, use_smooth=True):
 # ==========================================
 # 训练目标计算（公共入口，避免各训练脚本口径漂移）
 # ==========================================
-def compute_entry_target(df, window=20, eps=0.0001):
+def compute_entry_target(df, window=20, eps=0.0001, entry_price='close', mkt_ret=None):
     """
     计算入场模型训练目标：Gain-to-Pain Ratio (GPR)。
+
+    参数:
+    - entry_price: 'close' 表示今天收盘买入（历史默认）;
+                   'open' 表示明天开盘买入，更贴近真实执行 (buy_delay=1)。
+                   open 模式下会剔除次日开盘涨停的样本（gpr_target 设为 NaN）。
+    - mkt_ret: 可选，市场日收益 Series (index=date)。提供时用个股日收益减市场收益
+               （超额收益）再累计 GPR。
 
     返回在原始 df 上新增两列：
     - target_val: 未来 window 日真实收益率（用于审计 PnL）
@@ -1041,13 +1052,49 @@ def compute_entry_target(df, window=20, eps=0.0001):
     """
     if df.empty or 'close' not in df.columns:
         return df
-    daily_ret = df['close'].pct_change(1)
-    df['target_val'] = df['close'].pct_change(window).shift(-window)
-    pos_rets = daily_ret.clip(lower=0)
-    neg_rets = daily_ret.clip(upper=0).abs()
-    f_pos_sum = pos_rets.rolling(window).sum().shift(-window)
-    f_neg_sum = neg_rets.rolling(window).sum().shift(-window)
-    df['gpr_target'] = f_pos_sum / (f_neg_sum + eps)
+
+    if entry_price == 'open':
+        if 'open' not in df.columns:
+            raise ValueError("entry_price='open' 需要 df 包含 'open' 列")
+        entry = df['open'].shift(-1)
+        df['target_val'] = df['close'].shift(-window) / entry - 1.0
+
+        # 剔除次日开盘涨停（买不到）的样本
+        symbol = str(df.get('symbol', pd.Series(['unknown'])).iloc[0])
+        prefix = symbol[:3]
+        if prefix in ('300', '688'):
+            limit_rate = 0.2
+        elif prefix in ('92', '87', '83', '43'):
+            limit_rate = 0.3
+        else:
+            limit_rate = 0.1
+        limit_up = entry >= df['close'] * (1 + limit_rate - 1e-6)
+
+        # 构造 open-entry 持有期的每日收益序列
+        # 第1日：close(t+1)/open(t+1)-1；第2~window日：close(t+k)/close(t+k-1)-1
+        m = df['date'].map(mkt_ret) if mkt_ret is not None else None
+        first = df['close'].shift(-1) / entry - 1.0
+        if m is not None:
+            first = first - m.shift(-1)
+        pos_sum = first.clip(lower=0)
+        neg_sum = first.clip(upper=0).abs()
+        for k in range(2, window + 1):
+            ret = df['close'].shift(-k) / df['close'].shift(-(k - 1)) - 1.0
+            if m is not None:
+                ret = ret - m.shift(-k)
+            pos_sum = pos_sum + ret.clip(lower=0)
+            neg_sum = neg_sum + ret.clip(upper=0).abs()
+        df['gpr_target'] = pos_sum / (neg_sum + eps)
+        df.loc[limit_up, 'gpr_target'] = np.nan
+        df.loc[limit_up, 'target_val'] = np.nan
+    else:
+        daily_ret = df['close'].pct_change(1)
+        df['target_val'] = df['close'].pct_change(window).shift(-window)
+        pos_rets = daily_ret.clip(lower=0)
+        neg_rets = daily_ret.clip(upper=0).abs()
+        f_pos_sum = pos_rets.rolling(window).sum().shift(-window)
+        f_neg_sum = neg_rets.rolling(window).sum().shift(-window)
+        df['gpr_target'] = f_pos_sum / (f_neg_sum + eps)
     return df
 
 
