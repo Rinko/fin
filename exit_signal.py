@@ -58,8 +58,10 @@ def _score_channel(ldc,syms,mc,start,end,smooth,biz_feats,model,pred_name):
     g['_atr14'] = tr.groupby(g['symbol'], sort=False).transform(lambda s: s.rolling(14, min_periods=1).mean())
     feats = [f for f in model['features'] if f in g.columns]
     g[pred_name] = model['model'].predict(g[feats])
-    cols = ['date', 'symbol', 'close', '_atr14', pred_name] + (['risk_mag'] if 'risk_mag' in g.columns else [])
-    return g[cols].rename(columns={'_atr14': 'atr'})
+    cols = ['date', 'symbol', 'close', '_atr14', pred_name]
+    if biz_feats is co_compute.FeatureConfig.BIZ_RISK_FEATURES:
+        cols += [f for f in model['features'] if f in g.columns]   # ④风险幅度所需原始通道 z 列
+    return g[list(dict.fromkeys(cols))].rename(columns={'_atr14': 'atr'})
 
 def main():
     ap=argparse.ArgumentParser()

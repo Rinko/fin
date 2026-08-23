@@ -48,7 +48,7 @@ python get_base_data.py --task daily --date DATE   # 补某天
 | `generate_signals`（经 signals） | 全量候选导出 | `--start` 必须比目标窗口再提前 ≥400 自然日预留预热，否则**零信号** |
 | `simple_rank_benchmark`（经 bench） | 无规则纯排名对照 | 用于模型横向比较，成绩不代表策略收益 |
 | `get_base_data.py` | BaoStock 数据同步 |
-| `run.py daily` | 轻量每日信号：全市场打分→场景配额选买→持仓注入卖出规则链 | 已知降级：Risk_Mag_Exit 待④原始通道列复现后启用；大盘闸门以 --scenario/--allow-market-closed 简化 |
+| `run.py daily` | 轻量每日信号：全市场打分→场景配额选买→持仓注入卖出规则链 | 五条卖出规则全量生效（含 Risk_Mag_Exit）；大盘场景默认 normal，可用 --scenario 覆盖 |
 | `run.py audit exits` | 输入持仓 CSV(symbol,entry_date,entry_price[,shares]) 输出今日离场建议 | 大盘清仓类退出默认按 normal 场景，可用 --scenario 覆盖；Risk_Mag_Exit 当前降级跳过 | 更新后务必走「六、数据更新三查」 |
 | `config.py` | 所有参数唯一定义处 | 修改默认值在这里；业务线差异看 PROFILES |
 
