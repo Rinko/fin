@@ -20,6 +20,7 @@
   - 成绩（截至 2026-08-21 同口径 vs 生产旧四件套）：127.6% vs 111.6%，Sharpe 1.41 vs 1.27，Calmar 0.99 vs 0.94——双指标协议通过；check_trades 通过（Alpha 前5% 占比 98.6%、利润留存 66.9%）
   - 原则沉淀：**幅度模型单位由消费者定义**（阈值型要百分比、缩放型可归一化）；**阈值标定必须全量流式预测**，禁止头部子集样本；**模型×规则冗余时裁撤规则**
   - 幅度训练入口：`external_data/explore_night/signal_level_backtest_20260818/train_magnitude_align.py`（excess_tgt / risk_mag_tgt / hold_dd_tgt 三种 target 可切换；hold-dd 线已挂起）
+- **2026-08-23 生产切换完成**：root 四 pkl 已替换为 ALIGN 组（原四件套归档于 `external_data/models/archive_prod4_20260823/`）；`*_newfeat` 审计符号链接恢复指向生产组合；运行时默认 = ALIGN + 场景化 quota
 
 ## 外接盘存储 (2TB)
 - `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
