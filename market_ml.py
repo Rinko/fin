@@ -259,6 +259,8 @@ class AccumulationTrainer:
             reg_lambda=30.0,
             colsample_bytree=0.4,
             feature_contri=feature_contri,
+            deterministic=True,
+            force_row_wise=True,
             random_state=42,
             importance_type='gain'
         )
