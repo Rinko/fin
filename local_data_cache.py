@@ -56,6 +56,14 @@ class LocalDataCache:
                     PRIMARY KEY (code, dividOperateDate)
                 )
             ''')
+            # 全市场行情同步水位：记录已成功同步到的最近交易日 (单行表)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sync_watermark (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_synced_date TEXT,
+                    updated_at TEXT
+                )
+            ''')
             conn.commit()
 
     def _resolve_ids(self, stock_id):
@@ -555,127 +563,220 @@ class LocalDataCache:
         return self._apply_dynamic_adjust(df_raw_slice, symbol, code, adjust)
     
 
-    def update_daily_market_data(self, date_str=None):
-        """
-        🚀 全市场每日数据一键极速增量更新（纯物理底稿版 + 股票纯化版）
-        :param date_str: 格式为 'YYYY-MM-DD'。如果为 None，则自动使用今天日期。
-        """
-        if date_str is None:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            
-        print(f"\n==================== [开始全市场每日增量同步: {date_str}] ====================")
-        
-        # 1. 自动利用统一 Session 执行器获取今日全市场复权因子变更名单
-        print("步骤 [1/3]: 正在获取今日复权因子变更数据...")
+    # ==================== [同步水位管理] ====================
+    def _get_sync_watermark(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute("SELECT last_synced_date FROM sync_watermark WHERE id = 1").fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception:
+            pass
+        return None
+
+    def _set_sync_watermark(self, date_str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sync_watermark (id, last_synced_date, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "last_synced_date = MAX(COALESCE(last_synced_date,''), excluded.last_synced_date), "
+                "updated_at = excluded.updated_at",
+                (date_str, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            )
+
+    def _bootstrap_sync_watermark(self):
+        """存量库首次升级：以活跃股 max_date 的众数作为初始水位。"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT max_date, COUNT(*) AS c FROM cache_meta "
+                    "WHERE (out_date IS NULL OR out_date='') AND max_date IS NOT NULL "
+                    "GROUP BY max_date ORDER BY c DESC LIMIT 1"
+                ).fetchone()
+            if row and row[0]:
+                print(f"🧭 初始化同步水位: {row[0]} (依据 {row[1]} 只活跃股的最大日期众数)")
+                self._set_sync_watermark(row[0])
+                return row[0]
+        except Exception as e:
+            print(f"⚠️ 水位初始化失败: {e}")
+        return None
+
+    # ==================== [交易日历] ====================
+    def _get_trade_calendar(self, start_date, end_date):
+        """交易日历: 本地 zzqz_df.xlsx + BaoStock query_trade_dates 兜底。返回升序 YYYY-MM-DD 列表。"""
+        cal = set()
+        try:
+            if os.path.exists('zzqz_df.xlsx'):
+                df = pd.read_excel('zzqz_df.xlsx', usecols=['日期'])
+                days = pd.to_datetime(df['日期'], format='mixed').dt.strftime('%Y-%m-%d')
+                cal |= {d for d in days if start_date <= d <= end_date}
+        except Exception as e:
+            print(f"⚠️ 读取 zzqz 交易日历失败: {e}")
+
+        if self.code_fetcher is not None:
+            try:
+                rs = self.code_fetcher.query_trade_dates(start_date, end_date)
+                if rs is not None and not rs.empty and 'is_trading_day' in rs.columns:
+                    cal |= set(rs[rs['is_trading_day'].astype(str) == '1']['calendar_date'].tolist())
+            except Exception as e:
+                print(f"⚠️ BaoStock 交易日历查询失败: {e}")
+
+        return sorted(d for d in cal if start_date <= d <= end_date)
+
+    # ==================== [单日同步核心] ====================
+    def _sync_one_day(self, date_str):
+        """同步单个交易日的全市场行情。成功返回 True 并推进水位；失败/无数据返回 False。"""
+        print(f"\n---- 同步交易日 {date_str} ----")
+
+        # 步骤1: 除权除息名单
+        print("  [1/3] 获取当日复权因子变更数据...")
         df_factors_today = self.code_fetcher.query_daily_adjust_factor(date_str)
-        
         ex_dividend_codes = set()
         if df_factors_today is not None and not df_factors_today.empty:
             ex_dividend_codes = set(df_factors_today['code'].tolist())
-            print(f"👉 今日全市场共有 {len(ex_dividend_codes)} 只股票发生除权除息。")
+            print(f"  👉 {date_str} 共 {len(ex_dividend_codes)} 只股票除权除息")
         else:
-            print("👉 今日全市场无除权除息事件。")
-            
-        # 2. 获取今日全市场 A 股日 K 线数据
-        print("步骤 [2/3]: 正在获取今日全市场股票日K线数据...")
+            print(f"  👉 {date_str} 无除权除息事件")
+
+        # 步骤2: 全市场 A 股日 K 线
+        print("  [2/3] 获取当日全市场股票日K线数据...")
         df_astock = self.code_fetcher.query_daily_history_k_AStock(date_str)
-        
-        # 🌟 方案 A 修正：为了保持个股库纯净、排除生存者偏差并杜绝 ETF (如 510010) 混入，
-        # 我们在这里直接注释/删掉对 ETF 日K线数据的拉取。
-        df_kline_today = pd.DataFrame()
-        if df_astock is not None and not df_astock.empty:
-            df_kline_today = df_astock.copy()
-            
+        df_kline_today = df_astock.copy() if (df_astock is not None and not df_astock.empty) else pd.DataFrame()
         if df_kline_today.empty:
-            print(f"❌ {date_str} 未获取到任何股票K线数据（可能是非交易日或数据未发布）。更新终止。")
-            return
-            
-        # 过滤停牌或非正常交易日（tradestatus == '1' 代表正常交易）
+            print(f"  ❌ {date_str} 未获取到任何股票K线数据（非交易日/数据未发布/接口异常）")
+            return False
         if 'tradestatus' in df_kline_today.columns:
             df_kline_today = df_kline_today[df_kline_today['tradestatus'] == '1'].copy()
-            
         if df_kline_today.empty:
-            print(f"⚠️ {date_str} 全市场无正常交易标的（全部停牌或非交易日）。")
-            return
-            
-        print(f"步骤 [3/3]: 准备增量写入 {len(df_kline_today)} 只股票的今日不复权数据...")
-        
-        # 确保日期格式规范
+            print(f"  ⚠️ {date_str} 全市场无正常交易标的")
+            return False
+
+        print(f"  [3/3] 批量写入 {len(df_kline_today)} 只股票...")
         df_kline_today['date'] = pd.to_datetime(df_kline_today['date']).dt.strftime('%Y-%m-%d')
-        
+
         success_count = 0
         new_stock_count = 0
-        
-        # 逐个标的增量写入
+        meta_updates = []
+        now_str = datetime.now().strftime('%Y-%m-%d')
+        kline_cols = ('date', 'code', 'symbol', 'raw_open', 'raw_high', 'raw_low',
+                      'raw_close', 'raw_preclose', 'raw_volume', 'raw_amount', 'raw_turnover', 'raw_change_pct')
+        placeholders = ', '.join(['?'] * len(kline_cols))
+        insert_sql = f"INSERT INTO stock_data ({', '.join(kline_cols)}) VALUES ({placeholders})"
+
         for _, row in df_kline_today.iterrows():
             code = row['code']
             symbol = code.split('.')[1] if '.' in code else code
             db_path = self._get_symbol_db_path(symbol)
-            
-            # (A) 判断是否是新上市的股票（本地无历史数据库文件）
+
+            # (A) 新股建库
             if not os.path.exists(db_path):
-                print(f"🆕 发现新上市或新加入标的: {code}，正在进行历史数据初始化拉取...")
+                print(f"  🆕 新股 {code} 初始化建库...")
                 try:
-                    # 强拉 2010 年至今的历史不复权数据完成建库
                     self.get_stock_data(code, "2010-01-01", date_str, mode=3)
                     new_stock_count += 1
                     success_count += 1
                 except Exception as e:
-                    print(f"初始化新标的 [{code}] 失败: {e}")
+                    print(f"  初始化 [{code}] 失败: {e}")
                 continue
-                
-            # (B) 如果是今天除权的股票，优先下载并覆写其历史因子
+
+            # (B) 除权股刷新因子
             if code in ex_dividend_codes:
                 try:
                     self.sync_adjust_factors_from_api(code)
                 except Exception as e:
-                    print(f"更新除权股票 [{code}] 因子失败: {e}")
-            
-            # (C) 转换该行数据并写入
+                    print(f"  更新 [{code}] 因子失败: {e}")
+
+            # (C) 写入 K 线
             try:
-                row_dict = {}
-                row_dict['date'] = date_str
-                row_dict['code'] = code
-                row_dict['symbol'] = symbol
-                
-                # 🌟 核心修正：只向物理底稿库写入带 raw_ 前缀的不复权字段，极致压缩磁盘空间
-                row_dict['raw_open'] = float(row['open']) if row['open'] else None
-                row_dict['raw_high'] = float(row['high']) if row['high'] else None
-                row_dict['raw_low'] = float(row['low']) if row['low'] else None
-                row_dict['raw_close'] = float(row['close']) if row['close'] else None
-                row_dict['raw_preclose'] = float(row['preclose']) if row['preclose'] else None
-                row_dict['raw_volume'] = float(row['volume']) if row['volume'] else None
-                row_dict['raw_amount'] = float(row['amount']) if row['amount'] else None
-                
-                # 写入对应的原始比例列
-                row_dict['raw_turnover'] = float(row['turn']) if row['turn'] else None
-                row_dict['raw_change_pct'] = float(row['pctChg']) if row['pctChg'] else None
-                
-                # 安全写入：先清除可能存在的今日旧数据，然后以 append 方式安全插入
+                record = (
+                    date_str, code, symbol,
+                    float(row['open']) if row['open'] else None,
+                    float(row['high']) if row['high'] else None,
+                    float(row['low']) if row['low'] else None,
+                    float(row['close']) if row['close'] else None,
+                    float(row['preclose']) if row['preclose'] else None,
+                    float(row['volume']) if row['volume'] else None,
+                    float(row['amount']) if row['amount'] else None,
+                    float(row['turn']) if row['turn'] else None,
+                    float(row['pctChg']) if row['pctChg'] else None,
+                )
                 with sqlite3.connect(db_path) as conn:
-                    cursor = conn.cursor()
-                    # 检查表是否存在（极安全保护）
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='stock_data'")
-                    table_exists = cursor.fetchone() is not None
-                    
-                    if table_exists:
-                        conn.execute("DELETE FROM stock_data WHERE date = ?", (date_str,))
-                    
-                    cols = list(row_dict.keys())
-                    placeholders = ', '.join(['?'] * len(cols))
-                    sql = f"INSERT INTO stock_data ({', '.join(cols)}) VALUES ({placeholders})"
-                    conn.execute(sql, tuple(row_dict[c] for c in cols))
-                    
-                # (D) 同步更新 cache_meta 表中的 max_date
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE cache_meta SET max_date = ?, last_updated = ? WHERE symbol = ?", 
-                                   (date_str, datetime.now().strftime('%Y-%m-%d'), symbol))
-                    conn.commit()
-                    
+                    conn.execute("DELETE FROM stock_data WHERE date = ?", (date_str,))
+                    conn.execute(insert_sql, record)
+                meta_updates.append((date_str, now_str, symbol))
                 success_count += 1
             except Exception as e:
-                print(f"写入 [{code}] 每日增量失败: {e}")
-                
-        print(f"\n==================== [每日增量同步完成] ====================")
-        print(f"🎯 成功同步股票: {success_count} 只 | 自动建库新股: {new_stock_count} 只 | 同步日期: {date_str}")
+                print(f"  写入 [{code}] 失败: {e}")
+
+        # 批量更新 cache_meta（5000+ 只股票 meta 合并为一次写入）
+        if meta_updates:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.executemany(
+                        "UPDATE cache_meta SET max_date = MAX(COALESCE(max_date,''), ?), "
+                        "last_updated = ? WHERE symbol = ?",
+                        meta_updates
+                    )
+            except Exception as e:
+                print(f"  ⚠️ 批量更新 cache_meta 失败: {e}")
+
+        print(f"  ✅ {date_str} 同步完成: 成功 {success_count} 只, 新股 {new_stock_count} 只")
+
+        # 推进水位（取 MAX 防止旧日补账回退水位）
+        current_wm = self._get_sync_watermark() or ''
+        if date_str > current_wm:
+            self._set_sync_watermark(date_str)
+
+        return True
+
+    # ==================== [主入口] ====================
+    def update_daily_market_data(self, date_str=None):
+        """
+        🚀 全市场每日数据增量更新（智能补账版）。
+        :param date_str: 指定日期 YYYY-MM-DD 时仅补账该单日；
+                         为 None 时自动检测水位缺口，逐日补齐至最近交易日。
+        """
+        print(f"\n==================== [开始全市场增量同步] ====================")
+
+        # 单日补账模式（兼容 --date 原有语义）
+        if date_str:
+            ok = self._sync_one_day(date_str)
+            if ok:
+                print(f"\n🎯 单日补账完成: {date_str}")
+            else:
+                print(f"\n❌ {date_str} 同步未完成（无数据或接口异常）")
+            return
+
+        # 智能补账模式：从水位之后逐日补齐至今天
+        wm = self._get_sync_watermark() or self._bootstrap_sync_watermark()
+        today_str = datetime.now().strftime('%Y-%m-%d')
+
+        if wm is None:
+            print("⚠️ 无法确定同步水位（空库），仅尝试拉取今日数据...")
+            self._sync_one_day(today_str)
+            return
+
+        start = (pd.to_datetime(wm) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        if start > today_str:
+            print(f"✅ 本地行情已是最新, 同步水位: {wm}")
+            return
+
+        trade_days = self._get_trade_calendar(start, today_str)
+        if not trade_days:
+            print(f"✅ {start} ~ {today_str} 无缺失交易日, 已是最新, 同步水位: {wm}")
+            return
+
+        print(f"🔎 检测到缺失交易日 {len(trade_days)} 天: {trade_days[0]} ~ {trade_days[-1]}, 开始逐日补齐...")
+        synced = []
+        for d in trade_days:
+            if self._sync_one_day(d):
+                synced.append(d)
+            else:
+                print(f"⚠️ {d} 数据未发布或同步失败, 中止本次补账（下次运行将自动重试）")
+                break
+
+        print(f"\n==================== [增量同步完成] ====================")
+        if synced:
+            print(f"🎯 本次补齐 {len(synced)} 个交易日: {synced[0]} ~ {synced[-1]} | 水位: {self._get_sync_watermark()}")
+        else:
+            print(f"✅ 无需补账, 水位: {self._get_sync_watermark()}")

@@ -342,7 +342,7 @@ def task_market():
 # 任务 5：每日行情更新（BaoStock -> SQLite）
 # ============================================================
 def task_daily(date_str=None):
-    """任务5：更新每日行情数据到本地 SQLite 缓存"""
+    """任务5：更新每日行情数据到本地 SQLite 缓存（缺位自动逐日补齐至最近交易日）"""
     from stock_fetcher_bao import BaostockCodeFetcher
     from local_data_cache import LocalDataCache
 
@@ -350,11 +350,8 @@ def task_daily(date_str=None):
     fetcher = BaostockCodeFetcher()
     cache = LocalDataCache(code_fetcher=fetcher)
 
-    if not date_str:
-        date_str = datetime.now().strftime('%Y-%m-%d')
-
     cache.update_daily_market_data(date_str)
-    logger.info(f"任务5完成: {date_str} 行情已同步")
+    logger.info("任务5完成: 行情同步结束")
 
     # 5.1 行业数据同步 (申万一级): 日K增量 + 成分映射刷新 (新股纳入)
     # 加在 daily 内, 无需额外定期任务
@@ -365,7 +362,7 @@ def task_daily(date_str=None):
     except Exception as e:
         logger.error(f"行业数据同步失败(不影响行情主流程): {e}")
 
-    return {'rows': None, 'date': date_str, 'file': 'stock_data_cache/*.db'}
+    return {'rows': None, 'date': date_str or 'smart', 'file': 'stock_data_cache/*.db'}
 
 
 # ============================================================
@@ -387,7 +384,7 @@ TASK_DESC = {
     'daily': '每日行情更新（BaoStock -> SQLite）',
 }
 
-SEQUENTIAL = ['financial', 'macro', 'zzqz', 'market', 'daily']
+SEQUENTIAL = ['financial', 'macro', 'zzqz', 'daily', 'market']
 
 SUMMARY_LOG_FILE = 'data_sync_history.csv'
 

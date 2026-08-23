@@ -212,6 +212,26 @@ class BaostockCodeFetcher:
             print(f"[AStock批量] 数据解析异常: {e}")
             return None
 
+    # ==================== [新增：1.15 交易日历查询接口] ====================
+    def query_trade_dates(self, start_date=None, end_date=None):
+        """
+        查询区间内交易日历 (BaoStock query_trade_dates)。
+        :return: pandas.DataFrame [calendar_date, is_trading_day]；失败返回 None
+        """
+        rs = self._execute_api_with_retry(bs.query_trade_dates, start_date=start_date, end_date=end_date)
+        if rs is None:
+            return None
+        try:
+            data_list = []
+            while rs.next():
+                data_list.append(rs.get_row_data())
+            if not data_list:
+                return pd.DataFrame()
+            return pd.DataFrame(data_list, columns=rs.fields)
+        except Exception as e:
+            print(f"[交易日历] 解析异常: {e}")
+            return None
+
     # ==================== [新增：1.2 每日 ETF K线批量更新接口] ====================
     def query_daily_history_k_ETF(self, date):
         rs = self._execute_api_with_retry(bs.query_daily_history_k_ETF, date=date)
