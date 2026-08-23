@@ -67,7 +67,7 @@ def run(model_path=None, target_col=None):
         data_file = 'external_data/audit/chip_accumulation_v6_newfeat_data.csv'
     _log(f"审计数据: {data_file}")
 
-    nrows = int(os.environ.get('AUDIT_MAX_ROWS', 0)) or None
+    nrows = None  # 已禁用截断：全量流式（chunksize）
     usecols = ['date'] + features
     # target_col only added if it exists in data (risk_score typically doesn't)
     target_in_data = target_col and target_col not in features

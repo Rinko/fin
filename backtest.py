@@ -1,4 +1,5 @@
 import os
+os.makedirs(os.path.join('external_data','logs'), exist_ok=True)
 import pybroker
 from pybroker import Strategy, StrategyConfig
 from pybroker.data import DataSource
@@ -58,7 +59,7 @@ logging.basicConfig(
     force=True,
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler('log.log', encoding='utf-8', mode='w'),
+        logging.FileHandler(os.path.join('external_data','logs','log.log'), encoding='utf-8', mode='w'),
     ]
 )
 # 开启数据源物理缓存

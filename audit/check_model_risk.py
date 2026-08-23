@@ -3,7 +3,6 @@
 # 现役: chip_accumulation_v6_newfeat.pkl (29 特征) + chip_risk_model_v1_newfeat.pkl (32 特征)
 # 注意: 风控模型绑定审计数据 chip_risk_model_v1_newfeat_data.csv 若缺失, 将降级用入场审计数据
 #       做风控打分 (32 个风控特征均在入场数据中存在), 此时风控 IC/分箱维度自动跳过。
-# 可选 AUDIT_MAX_ROWS 快速冒烟测试。
 import os
 import joblib
 import logging
@@ -28,11 +27,8 @@ def _log(msg):
 
 
 def _read(data_path, usecols):
-    nrows = os.environ.get('AUDIT_MAX_ROWS')
-    kw = dict(usecols=usecols)
-    if nrows:
-        kw['nrows'] = int(nrows)
-    return pd.read_csv(data_path, **kw)
+    # 全量读取，禁止截断（口径统一原则）
+    return pd.read_csv(data_path, usecols=usecols)
 
 
 def run_synergy_audit(buy_model_path=BUY_MODEL_DEFAULT, risk_model_path=RISK_MODEL_DEFAULT,
@@ -92,7 +88,7 @@ def run_synergy_audit(buy_model_path=BUY_MODEL_DEFAULT, risk_model_path=RISK_MOD
     risk_df = risk_df[risk_df['date'] >= pd.Timestamp(OOS_START)].copy()
 
     if buy_df.empty or risk_df.empty:
-        print("❌ OOS 段为空 (数据范围或 AUDIT_MAX_ROWS 过小)，跳过。")
+        print("❌ OOS 段为空，跳过。")
         return
 
     # 合并
