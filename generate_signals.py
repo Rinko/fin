@@ -16,15 +16,7 @@ from datetime import datetime
 # =========================================================================
 # 与 G_pca1_z 生产口径对齐（必须在 import co_compute / backtest 之前）
 # =========================================================================
-os.environ['BASE_TARGET_SIZE'] = '0.12'
-os.environ['POS_MULT_WEIGHT'] = '0.5'
-os.environ['POS_MULT_BIAS'] = '0.5'
-os.environ['OPPORT_SIZING_COEFF'] = '0.30'
-os.environ['OPPORT_SIZING_MIN'] = '0.4'
-os.environ['OPPORT_SIZING_MAX'] = '1.8'
-os.environ['RISK_MAG_SELL_THRESHOLD'] = '-0.05'
 # 信号生成不需要真正下单，quota 设为 0 加速
-os.environ['BUY_QUOTA_OVERRIDE'] = '0'
 
 import co_compute
 co_compute.FeatureConfig.MKT_FEATURES = ['mkt_macro_regime']
@@ -35,10 +27,10 @@ co_compute.FeatureConfig.PC_TABLE_PATH = os.path.join(
 import screen
 import backtest
 
-ENTRY_PKL = 'chip_accumulation_v6_g_pca1_z.pkl'
-RISK_PKL = 'chip_risk_model_v1_g_pca1_z.pkl'
-OPPORT_PKL = 'chip_opport_magnitude_excess_for_g.pkl'
-RISKMAG_PKL = 'chip_risk_magnitude_for_g.pkl'
+ENTRY_PKL = os.environ.get('ENTRY_MODEL_PKL', 'chip_accumulation_v6_g_pca1_z.pkl')
+RISK_PKL = os.environ.get('RISK_MODEL_PKL', 'chip_risk_model_v1_g_pca1_z.pkl')
+OPPORT_PKL = os.environ.get('OPPORT_PKL', 'chip_opport_magnitude_excess_for_g.pkl')
+RISKMAG_PKL = os.environ.get('RISKMAG_PKL', 'chip_risk_magnitude_for_g.pkl')
 WARMUP_BARS = 270
 
 
@@ -104,7 +96,7 @@ def generate(start_date, end_date, out_dir):
 def main():
     parser = argparse.ArgumentParser(description='生成每日候选信号 CSV')
     parser.add_argument('--start', type=str, default='2021-01-02', help='开始日期')
-    parser.add_argument('--end', type=str, default='2026-08-17', help='结束日期')
+    parser.add_argument('--end', type=str, default='2026-08-21', help='结束日期')
     parser.add_argument('--out', type=str,
                         default='external_data/explore_night/signal_level_backtest_20260818/signals',
                         help='输出目录')
