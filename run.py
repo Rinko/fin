@@ -105,6 +105,11 @@ def main():
             runpy.run_path(ex,run_name='__main__')
         else:
             print('[daily] 未提供 --holdings，跳过离场判定')
+        ci='check_invariants.py'; sf=f"{outdir}/{tag}_scores.csv"
+        sarg=['--scores',sf]
+        slf=f"{outdir}/{tag}_sell_signals.csv"
+        if os.path.exists(slf): sarg+=['--sell',slf]
+        sys.argv=[ci]+sarg; runpy.run_path(ci,run_name='__main__')
     elif line == 'audit':
         _dispatch_audit(rest)
 
