@@ -85,13 +85,24 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
 - floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
 - 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
 
+## 统一入口（2026-08-23 起）
+
+```text
+run.py ── config.apply(line) ──┬─ prod/backtest → main.py(哨兵) → screen → backtest(PyBroker)
+│                               │                   ├─ signal_engine / co_compute / is_market_ok
+├─ signals → generate_signals   ├─ bench → simple_rank_benchmark（外接盘）
+├─ audit → check_trades / entry / risk / magnitude / signal_level
+└─ train  → market_ml + train_magnitude_align（外接盘）
+config.py = 唯一参数源（六业务线 profile；MANAGED_KEYS 全量盖章；其余模块禁止写 env）
+```
+
 ## 常用命令
 ```bash
 python main.py                                    # 每日完整流程
 python get_base_data.py --task all                # 全部数据同步
 python get_base_data.py --task daily --date DATE  # 回填某天
-python ml_check.py                                # 模型评估
-python check_trades.py                            # 交易复盘
+python run.py audit entry|risk|magnitude          # 模型审计（统一入口）
+python run.py audit trades                        # 交易复盘
 ```
 
 ## 关键文件
@@ -115,7 +126,7 @@ python check_trades.py                            # 交易复盘
 
 ## ML 模型特征
 - 入场模型：23 特征（21 个股筹码 + 1 复合 + 1 大盘）— `chip_accumulation_v6_g_pca1_z.pkl`
-- 风控模型：24 特征（23 个股筹码 + 1 复合 + 1 大盘）— `chip_risk_model_v1_g_pca1_z.pkl`
+- 风控模型：25 特征（24 个股筹码含复合 + 1 大盘）— `chip_risk_model_v1_g_pca1_z.pkl`
 - 幅度模型：
   - 机会幅度（超额收益）— `chip_opport_magnitude_excess_for_g.pkl`
   - 风险幅度 — `chip_risk_magnitude_for_g.pkl`
@@ -125,8 +136,8 @@ python check_trades.py                            # 交易复盘
 
 ## 模型审计
 - **训练后必须审计**：任何模型训练完成后，立即运行对应审计脚本检查预测分布、IC、区分度
-- `ml_check.py`（→ `audit/check_model_entry.py`）：入场模型审计（IC/top-k/特征重要性）
-- `ml_check_sell.py`（→ `audit/check_model_risk.py`）：风控模型审计 + 入场/风控协同
+- `run.py audit entry`（audit/check_model_entry.py）：入场模型审计（IC/top-k/特征重要性/全量流式）
+- `run.py audit risk`（audit/check_model_risk.py）：风控模型审计 + 入场/风控协同
 - `audit/check_magnitude_model.py <pkl路径>`：**幅度模型审计**（MSE 压缩检测、日Z-score可用性）
 - `audit/check_data.py` / `check_base_data.py`：数据健壮性审计
 - `audit/check_screen.py` / `check_backtest.py`：海选漏斗审计
@@ -154,7 +165,7 @@ python check_trades.py                            # 交易复盘
 9. **大盘特征不再强制降权**：历史 `mkt_contri=0.45` 规则已失效；当前默认等权（contri=1.0），让模型自主分配市场/个股特征权重
 10. **PyBroker Warmup**：`start_date = 交易期起点 − warmup 个交易日`（用 zzqz_df.xlsx 交易日历），区间 < warmup 日数则不产生交易
 11. **Live Signal**：只在 `run_backtest` 结束后从末个交易日输出，区间短/股票池小可能无输出
-12. **模型加载**：`backtest.py` 默认加载旧模型，需 `backtest.reload_models()` 切换现役 `chip_accumulation_v6_g_pca1_z.pkl`，并通过 `backtest.load_magnitude_models()` 加载机会/风险幅度模型
+12. **模型加载**：backtest.py **不再 import 期加载模型**（哨兵置空）；由入口显式调用 `backtest.reload_models()` + `load_magnitude_models()`；直跑 `main.py` 会被 RUN_LINE 哨兵拒绝，统一走 `run.py prod|backtest`
 
 ## 缓存结构
 - `stock_data_cache/stock_data.db`：元数据 + 复权因子
