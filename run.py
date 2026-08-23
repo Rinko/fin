@@ -44,6 +44,7 @@ def main():
     rest = sys.argv[2:]
 
     import config
+    os.environ['RUN_LINE']=line
     diff = config.apply(line)
     print(f"[run] 业务线={line} | 环境变更 {len(diff)} 项: {', '.join(diff[:8])}{' ...' if len(diff)>8 else ''}")
 

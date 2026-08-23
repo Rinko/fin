@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+if os.environ.get('RUN_LINE') not in ('prod', 'backtest'):
+    raise SystemExit("[main] 请通过统一入口调用: python run.py prod|backtest ...（参数由 config.py 统一管理）")
 """
 每日运行脚本：更新数据 → 加载最优模型 → 回测选股 → 输出今日信号
 
@@ -27,13 +29,6 @@ from datetime import datetime
 # =============================================================================
 # 仓位基准：0.12 曾导致并发市值达权益的 ~2.9 倍、现金约束在 >50% 交易日拒单；
 # 降至 0.04 后峰值占用 ≈0.98×权益，quota 内信号可全部成交（INITIAL_CASH 维持 1M 口径不变）
-os.environ['BASE_TARGET_SIZE'] = os.environ.get('BASE_TARGET_SIZE', '0.04')
-os.environ['POS_MULT_WEIGHT'] = '0.5'
-os.environ['POS_MULT_BIAS'] = '0.5'
-os.environ['OPPORT_SIZING_COEFF'] = '0.30'
-os.environ['OPPORT_SIZING_MIN'] = '0.4'
-os.environ['OPPORT_SIZING_MAX'] = '1.8'
-os.environ['RISK_MAG_SELL_THRESHOLD'] = '-0.05'
 
 import co_compute
 
