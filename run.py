@@ -25,6 +25,7 @@ def _dispatch_audit(rest):
         'risk':         'audit/check_model_risk.py',
         'magnitude':    'audit/check_magnitude_model.py',
         'signal_level': 'audit_signal_level.py',
+        'exits':        'exit_signal.py',
     }
     if not rest:
         raise SystemExit(f"[run] audit 需要名称: {sorted(mapping)}")

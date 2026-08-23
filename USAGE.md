@@ -23,6 +23,7 @@ python run.py backtest              # ② 组合回测（区间至 BASELINE_END�
 python run.py signals               # ③ 导出全量候选 CSV（研究用）
 python run.py bench                 # ④ 极简排名基准（模型比较专用）
 python run.py audit entry|risk|magnitude|trades|signal_level   # ⑤ 审计
+python run.py audit exits --holdings 持仓.csv --start 2026-01-01      # ⑥ 持仓离场信号
 ```
 
 数据同步（另一入口）：
@@ -45,7 +46,8 @@ python get_base_data.py --task daily --date DATE   # 补某天
 | `run.py prod/backtest` | 生产信号 / 组合回测 | **不可直跑 main.py**（哨兵会拒绝）；参数由 config.py 统一管理 |
 | `generate_signals`（经 signals） | 全量候选导出 | `--start` 必须比目标窗口再提前 ≥400 自然日预留预热，否则**零信号** |
 | `simple_rank_benchmark`（经 bench） | 无规则纯排名对照 | 用于模型横向比较，成绩不代表策略收益 |
-| `get_base_data.py` | BaoStock 数据同步 | 更新后务必走「六、数据更新三查」 |
+| `get_base_data.py` | BaoStock 数据同步 |
+| `run.py audit exits` | 输入持仓 CSV(symbol,entry_date,entry_price[,shares]) 输出今日离场建议 | 大盘清仓类退出默认按 normal 场景，可用 --scenario 覆盖；Risk_Mag_Exit 当前降级跳过 | 更新后务必走「六、数据更新三查」 |
 | `config.py` | 所有参数唯一定义处 | 修改默认值在这里；业务线差异看 PROFILES |
 
 ## 五、常见问题（FAQ）
