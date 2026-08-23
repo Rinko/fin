@@ -70,12 +70,10 @@ pd.set_option('display.max_columns', None)
 # =========================================================================
 # 预先在全局加载预训练模型包
 # =========================================================================
-GLOBAL_MODEL_PKG = joblib.load('chip_accumulation_v6.pkl')
-GLOBAL_RISK_MODEL_PKG = joblib.load('chip_risk_model_v1.pkl')
-trained_lgbm = GLOBAL_MODEL_PKG['model']
-model_features = GLOBAL_MODEL_PKG['features']
-trained_risk_lgbm = GLOBAL_RISK_MODEL_PKG['model']
-model_risk_features = GLOBAL_RISK_MODEL_PKG['features']
+# 哨兵：模型一律经 reload_models()/load_magnitude_models() 显式初始化（由统一入口保证时序）。
+# 禁止依赖 import 期隐式加载；未初始化即使用会在此处立即暴露。
+GLOBAL_MODEL_PKG = GLOBAL_RISK_MODEL_PKG = None
+trained_lgbm = model_features = trained_risk_lgbm = model_risk_features = None
 
 def reload_models(entry_pkl='chip_accumulation_v6.pkl', risk_pkl='chip_risk_model_v1.pkl'):
     """热重载模型包，供滚动重训脚本在每次折叠后切换使用新训练权重。"""
