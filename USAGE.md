@@ -45,7 +45,8 @@ python get_base_data.py --task daily --date DATE   # 补某天
 | 脚本 | 功能 | 注意事项 |
 |---|---|---|
 | `run.py prod/backtest` | 生产信号 / 组合回测 | **不可直跑 main.py**（哨兵会拒绝）；参数由 config.py 统一管理 |
-| `generate_signals`（经 signals） | 全量候选导出 | `--start` 必须比目标窗口再提前 ≥400 自然日预留预热，否则**零信号** |
+| `generate_signals`（经 signals） | 全量候选导出 | `--start` 需按 config 统一前推（WARMUP_TRADING_DAYS=600 交易日，日历精确回推），
+  不足会因 EMA 路径依赖导致同日分数漂移甚至头部翻转；过短直接**零信号** |
 | `simple_rank_benchmark`（经 bench） | 无规则纯排名对照 | 用于模型横向比较，成绩不代表策略收益 |
 | `get_base_data.py` | BaoStock 数据同步 |
 | `run.py daily` | 轻量每日信号：全市场打分→场景配额选买→持仓注入卖出规则链 | 五条卖出规则全量生效（含 Risk_Mag_Exit）；大盘场景默认 normal，可用 --scenario 覆盖 |
@@ -58,7 +59,7 @@ python get_base_data.py --task daily --date DATE   # 补某天
 设计如此。所有参数由 config.py 按业务线统一盖章，防止口径漂移。
 
 **Q2 跑完没有任何信号？**
-按顺序排查：① `--start` 是否前推了 ≥400 自然日；② 当期是否处于 risk/大盘关闭状态（属正常风控）；③ `run.py audit entry` 看模型审计是否异常。
+按顺序排查：① `--start` 是否满足 600 交易日统一预热；② 当期是否处于 risk/大盘关闭状态（属正常风控）；③ `run.py audit entry` 看模型审计是否异常。
 
 **Q3 想临时调参（如回测区间）？**
 命令行参数（--days/--start 等）直接传；环境类参数改 `config.py` 对应 PROFILES 或 DEFAULTS。

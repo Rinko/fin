@@ -71,6 +71,12 @@ def generate(start_date, end_date, out_dir):
         return
 
     df = pd.DataFrame(raw)
+    print(f"[DEBUG] 评估记录总数={len(df)} | 各否决旗标 False 占比:")
+    for c in ['is_profit_ok','is_active','can_buy_final','is_chip_ready','market_ok']:
+        if c in df.columns:
+            print(f"[DEBUG]   {c}: True率={df[c].mean():.3f}")
+    if 'ml_rank' in df.columns:
+        print(f"[DEBUG] ml_rank 分位:", df['ml_rank'].quantile([.1,.5,.9]).round(4).to_dict())
     # 只保留真正通过买入硬门槛的候选
     signals = df[df['is_eligible'] == True].copy()
     signals = signals.sort_values(['date', 'ml_rank'])
