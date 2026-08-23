@@ -1,31 +1,77 @@
-# Fin 策略业务用法速查（2026-08-23 起）
+# Fin 量化选股系统 · 业务使用手册
 
-## 每日运行
+> 面向日常使用者。技术规范见 `AGENTS.md`，历史探索见 `EXPLORE_LOG.md`。
+
+## 一、系统做什么
+
+每个交易日收盘后，对全市场约 5000 只 A 股打分排序；结合大盘状态（底部/机会/谨慎/正常/风险五象限）决定当日买入名额与标的；持仓后由风控规则（风险排名恶化、幅度阈值、效率退出等）自动卖出，平均持有约 5~6 个交易日。
+
+四个模型分工：
+
+| 模型 | 职责 | 一句话 |
+|---|---|---|
+| 入场排名 | 选谁进候选池 | 预测未来 20 日相对强弱排名 |
+| 风控排名 | 持仓预警 | 预测短期危险度，恶化即退出 |
+| 机会幅度 | 买多重 | 预测超额收益幅度，正超门槛加仓 |
+| 风险幅度 | 何时必须跑 | 预测最差单日跌幅，破 -5% 清仓 |
+
+## 二、命令速查（唯一入口 run.py）
+
 ```bash
-python run.py prod --no-data      # 生产信号（ALIGN 四件套 + 场景化 quota）
-python run.py backtest            # 组合回测（区间至 BASELINE_END，默认 2026-08-17）
-python run.py signals             # 全量候选导出（轻量口径）
-python run.py audit trades|entry|risk|magnitude   # 审计
+python run.py prod --no-data        # ① 每日生产信号（核心命令）
+python run.py backtest              # ② 组合回测（区间至 BASELINE_END）
+python run.py signals               # ③ 导出全量候选 CSV（研究用）
+python run.py bench                 # ④ 极简排名基准（模型比较专用）
+python run.py audit entry|risk|magnitude|trades|signal_level   # ⑤ 审计
 ```
 
-## 现役配置
-- 模型：ALIGN 四件套 —— 入场(close→close20 GPR 秩回归) / 风控排名(原始通道) /
-  机会幅度(超额收益%,原始值+hurdle 消费) / 风险幅度(未来5日最差单日%,阈值-0.05)
-- 规则：场景化 quota risk=0 / normal=2 / caution=3 / bottom=opp=5；
-  ml_rank_floor 全关；BASE_TARGET_SIZE=0.04；初始资金口径 1M
-- 同口径基线（vs 生产旧四件套）：**127.6% vs 111.6%，Sharpe 1.41 vs 1.27，Calmar 0.99 vs 0.94**
+数据同步（另一入口）：
+```bash
+python get_base_data.py --task all                 # 全量同步
+python get_base_data.py --task daily --date DATE   # 补某天
+```
 
-## 硬性约束（违反即静默出错）
-1. **必须经统一入口**：直跑 `main.py` 被 RUN_LINE 哨兵拒绝；参数只认 `config.py` 盖章值
-2. **generate_signals / 影子跑法：`--start` 必须前推 ≥400 自然日** 预留指标 warmup，
-   否则评估循环不执行、零信号（AGENTS 注意事项#10）
-3. **幅度模型单位契约**：阈值型消费者(④)要百分比原始值；缩放型消费者(③)可归一化
-4. **阈值标定必须全量流式预测**，禁止用排序头部子集样本估分位
+## 三、每日操作流程
 
-## 数据更新后的三步必查
-1. `run.py audit entry` / `run.py audit risk` 全量审计通过
-2. 影子 jaccard 对比上次记录（突降 = 重训隐性换头部警报）
-3. 短窗回测冒烟能正常出信号
+1. 收盘后执行数据同步；
+2. `run.py prod --no-data` —— 输出当日候选与信号（results 目录 + 终端摘要）；
+3. 核对信号数是否正常（近期常态：日均 0~5 只，risk 日为 0 属正常）；
+4. 每周一次 `run.py audit trades` 复盘成交质量。
 
-## 回滚预案
-旧四件套：`external_data/models/archive_prod4_20260823/` 四个 pkl 复制回 root 即还原。
+## 四、各脚本功能与注意事项
+
+| 脚本 | 功能 | 注意事项 |
+|---|---|---|
+| `run.py prod/backtest` | 生产信号 / 组合回测 | **不可直跑 main.py**（哨兵会拒绝）；参数由 config.py 统一管理 |
+| `generate_signals`（经 signals） | 全量候选导出 | `--start` 必须比目标窗口再提前 ≥400 自然日预留预热，否则**零信号** |
+| `simple_rank_benchmark`（经 bench） | 无规则纯排名对照 | 用于模型横向比较，成绩不代表策略收益 |
+| `get_base_data.py` | BaoStock 数据同步 | 更新后务必走「六、数据更新三查」 |
+| `config.py` | 所有参数唯一定义处 | 修改默认值在这里；业务线差异看 PROFILES |
+
+## 五、常见问题（FAQ）
+
+**Q1 直跑 `python main.py` 报错"请通过统一入口"？**
+设计如此。所有参数由 config.py 按业务线统一盖章，防止口径漂移。
+
+**Q2 跑完没有任何信号？**
+按顺序排查：① `--start` 是否前推了 ≥400 自然日；② 当期是否处于 risk/大盘关闭状态（属正常风控）；③ `run.py audit entry` 看模型审计是否异常。
+
+**Q3 想临时调参（如回测区间）？**
+命令行参数（--days/--start 等）直接传；环境类参数改 `config.py` 对应 PROFILES 或 DEFAULTS。
+
+**Q4 模型文件在哪、怎么回滚？**
+现役四件套在项目根目录；上一版在 `external_data/models/archive_prod4_20260823/`，
+复制回根目录即完成回滚。
+
+## 六、现役版本与成绩（截至 2026-08-21 同口径）
+
+- 版本：ALIGN 四件套（2026-08-23 切换）
+- 规则：quota risk=0 / normal=2 / caution=3 / bottom=opp=5；floor 关；仓位基准 4%
+- 成绩 vs 旧版：**127.6% vs 111.6%｜Sharpe 1.41 vs 1.27｜Calmar 0.99 vs 0.94**
+- 旧版回滚：见 Q4
+
+## 七、数据更新后的三步必查
+
+1. `run.py audit entry` 与 `run.py audit risk` 全量审计通过（无截断告警）；
+2. 影子对比 jaccard 未突降（对比工具：`external_data/shadow/shadow_diff.py`）；
+3. 短窗冒烟能正常出信号。
