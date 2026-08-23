@@ -72,7 +72,8 @@ def main():
         kn,pad=pa.parse_known_args(rest)
         passthrough=pad
         end=kn.end or __import__('pandas').Timestamp.now().strftime('%Y-%m-%d')
-        start=kn.start or (__import__('pandas').Timestamp(end)-pd.Timedelta(days=420)).strftime('%Y-%m-%d')
+        _w=int(os.environ.get('DAILY_WARMUP_BARS','0')) or None
+        start=kn.start or __import__('config').padded_start(end,warmup=_w)
         outdir=os.environ.get('DAILY_OUTDIR','external_data/daily')
         gs_argv=['generate_signals.py','--start',start,'--end',end,'--out',outdir]+passthrough
         print(f"[daily] 权威管线出候选: {start}..{end} -> {outdir}")

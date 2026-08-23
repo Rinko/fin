@@ -41,6 +41,9 @@ DEFAULTS = {
     'MODERATE_BUSINESS_RULES': '0',
     'USE_PROFIT_RATIO_CON': '0',
     'CO_COMBO_FEATURES': '0',
+    # 指标预热（语义参数）：所有入口的 fetch 起点由 padded_start() 按交易日历精确回推，
+    # 保证 EMA 等递归特征与抓取起点无关
+    'WARMUP_TRADING_DAYS': '600',   # 深预热：EMA 路径依赖归零，跨入口打分逐位一致
     # 回测控制
     'BUY_QUOTA_OVERRIDE': '',          # 空串=删除该 env，走场景化 quota
     'BASELINE_END': '2026-08-17',
@@ -82,6 +85,16 @@ def apply(line):
                 os.environ[k] = want
                 changed.append(f'{k}={want}')
     return changed
+
+
+def padded_start(end, warmup=None):
+    """按中证全指交易日历，从 end 精确回推 warmup 个交易日。"""
+    import pandas as pd
+    w = int(warmup) if warmup is not None else int(os.environ.get('WARMUP_TRADING_DAYS', '270'))
+    z = pd.read_excel('zzqz_df.xlsx').rename(columns={'日期': 'date'})
+    d = pd.to_datetime(z['date'])
+    d = d[d <= pd.Timestamp(end)].sort_values().reset_index(drop=True)
+    return d.iloc[max(len(d) - 1 - w, 0)].strftime('%Y-%m-%d')
 
 
 def summary(line):
