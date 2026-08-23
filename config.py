@@ -61,6 +61,7 @@ PROFILES = {
     'signals':  {'BUY_QUOTA_OVERRIDE': '0'},   # 只出候选不下单
     'bench':    {'MODERATE_BUSINESS_RULES': '1', 'RESULTS_DIR_SUFFIX': '_bench'},
     'audit':    {},
+    'daily':    {},   # 轻量每日信号（买入+卖出）
     'train':    {k: v for k, v in DEFAULTS.items() if k.startswith(('TRAIN_',)) },
 }
 

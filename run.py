@@ -26,6 +26,7 @@ def _dispatch_audit(rest):
         'magnitude':    'audit/check_magnitude_model.py',
         'signal_level': 'audit_signal_level.py',
         'exits':        'exit_signal.py',
+        'daily':        'daily_signal.py',
     }
     if not rest:
         raise SystemExit(f"[run] audit 需要名称: {sorted(mapping)}")
@@ -62,6 +63,9 @@ def main():
         p = 'external_data/explore_night/signal_level_backtest_20260818/simple_rank_benchmark.py'
         sys.argv = [p] + rest
         runpy.run_path(p, run_name='__main__')
+    elif line == 'daily':
+        sys.argv = ['daily_signal.py'] + rest
+        runpy.run_path('daily_signal.py', run_name='__main__')
     elif line == 'audit':
         _dispatch_audit(rest)
 
