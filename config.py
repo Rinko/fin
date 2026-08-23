@@ -25,8 +25,8 @@ DEFAULTS = {
     'POS_MULT_WEIGHT':  '0.5',
     'POS_MULT_BIAS':    '0.5',
     'OPPORT_SIZING_COEFF': '0.30',
-    'OPPORT_SIZING_MIN':   '0.4',
-    'OPPORT_SIZING_MAX':   '1.8',
+    'OPPORT_SIZING_MIN':   '0.5',   # 生产锚点口径(main直跑引擎默认)
+    'OPPORT_SIZING_MAX':   '1.5',
     'OPPORT_HURDLE':       '0.02',
     # 风控退出
     'RISK_MAG_SELL_THRESHOLD': '-0.05',

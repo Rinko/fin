@@ -48,6 +48,14 @@ def main():
     import config
     os.environ['RUN_LINE']=line
     diff = config.apply(line)
+    # KEY=VALUE 透传：业务线实验覆盖（apply 之后生效）
+    import re as _re
+    kept=[]
+    for x in rest:
+        m=_re.match(r'^([A-Z][A-Z0-9_]+)=(.+)$',x)
+        if m: os.environ[m.group(1)]=m.group(2); print(f'[run] 覆盖 {m.group(1)}={m.group(2)}')
+        else: kept.append(x)
+    rest=kept
     print(f"[run] 业务线={line} | 环境变更 {len(diff)} 项: {', '.join(diff[:8])}{' ...' if len(diff)>8 else ''}")
 
     if line == 'prod':
