@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 if os.environ.get('RUN_LINE') not in ('prod', 'backtest'):
     raise SystemExit("[main] 请通过统一入口调用: python run.py prod|backtest ...（参数由 config.py 统一管理）")
 """
