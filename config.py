@@ -24,10 +24,10 @@ DEFAULTS = {
     'BASE_TARGET_SIZE': '0.04',
     'POS_MULT_WEIGHT':  '0.5',
     'POS_MULT_BIAS':    '0.5',
-    'OPPORT_SIZING_COEFF': '0.30',
+    'OPPORT_SIZING_COEFF': '0.20',
     'OPPORT_SIZING_MIN':   '0.5',   # 生产锚点口径(main直跑引擎默认)
     'OPPORT_SIZING_MAX':   '1.5',
-    'OPPORT_HURDLE':       '0.02',
+    'OPPORT_HURDLE':       '0.03',
     # 风控退出
     'RISK_MAG_SELL_THRESHOLD': '-0.05',
     # ml_rank floor（默认全关）
