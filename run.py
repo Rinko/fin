@@ -8,7 +8,7 @@ run.py — 全系统唯一 CLI 入口
     python run.py backtest  [--days N | main 参数...]  # 组合回测（默认截至 BASELINE_END）
     python run.py signals   [generate_signals 参数...] # 全量候选导出（轻量）
     python run.py bench     [simple_rank_benchmark 参数...]
-    python run.py audit <name> [参数...]               # name ∈ trades/entry/risk/magnitude/signal_level
+    python run.py audit <name> [参数...]               # name ∈ trades/entry/risk/magnitude/signal_level/scenario/challenger
 
 约定：
 1. 先 config.apply(line) 盖章环境，再加载业务模块（import 顺序不可颠倒）。
@@ -25,6 +25,8 @@ def _dispatch_audit(rest):
         'risk':         'audit/check_model_risk.py',
         'magnitude':    'audit/check_magnitude_model.py',
         'signal_level': 'audit_signal_level.py',
+        'scenario':     'audit/check_scenario.py',
+        'challenger':   'audit/scenario_challenger.py',
         'exits':        'exit_signal.py',
         'daily':        'daily_signal.py',
     }

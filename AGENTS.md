@@ -32,7 +32,7 @@ python run.py prod --no-data              # 重路径生产校验（PyBroker 全
 python run.py backtest                    # 组合回测（至 BASELINE_END）
 python run.py signals                     # 全量候选导出
 python run.py bench                       # 极简排名基准
-python run.py audit entry|risk|magnitude|trades|exits|signal_level
+python run.py audit entry|risk|magnitude|trades|exits|signal_level|scenario|challenger
 python get_base_data.py --task all        # 全部数据同步
 ```
 

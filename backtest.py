@@ -785,6 +785,49 @@ def get_trend_signals(ctx, scenario):
 BUY_ELIGIBILITY_DETAILS = []
 # 买入资格与打分逻辑已迁移至 signal_engine.check_buy_eligibility_and_score
 
+_SHADOW_LABELS = None
+_SHADOW_MISS_WARNED = False
+
+
+def _load_shadow_labels():
+    """影子场景标签源 (challenger 实验通道)。
+
+    设置环境变量 SCENARIO_LABELS_CSV 后, before_exec_fn 的每日大盘场景改从该
+    CSV 读取 (audit/scenario_challenger.py 落盘的 labels_challenger.csv),
+    用于与现役 is_market_ok 决策树做同口径组合回测对比; 未设置时零影响。
+    """
+    global _SHADOW_LABELS
+    path = os.environ.get('SCENARIO_LABELS_CSV')
+    if not path:
+        return None
+    if _SHADOW_LABELS is None:
+        df = pd.read_csv(path)
+        dcol = 'date' if 'date' in df.columns else 'index'
+        df['dt'] = pd.to_datetime(df[dcol]).dt.normalize()
+        _SHADOW_LABELS = df.set_index('dt')
+        logging.info(f"[shadow] 场景标签源: {path} ({len(_SHADOW_LABELS)} 天)")
+    return _SHADOW_LABELS
+
+
+def _shadow_scenario(current_dt):
+    """返回影子标签 dict; 缺失日期返回 None (回退现役判定并告警一次)。"""
+    global _SHADOW_MISS_WARNED
+    shadow = _load_shadow_labels()
+    if shadow is None:
+        return None, False
+    key = pd.Timestamp(current_dt).normalize()
+    if key not in shadow.index:
+        return None, True
+    r = shadow.loc[key]
+    if isinstance(r, pd.DataFrame):
+        r = r.iloc[0]
+    return {
+        'is_market_ok': bool(r.get('is_market_ok', True)),
+        'position_multiplier': float(r.get('position_multiplier', 0.5)),
+        'primary_scenario': str(r['primary_scenario']),
+        'decision_reason': f"[shadow] {r.get('decision_reason', '')}",
+    }, False
+
 
 def before_exec_fn(ctx_map):
     if not ctx_map:
@@ -798,7 +841,7 @@ def before_exec_fn(ctx_map):
     # 1. 每天仅计算一次大盘环境并统一存入缓存
     if current_dt not in _daily_market_cache:
         money_sig = calculate_money_supply_signal(money_df, current_dt)
-        
+
         # 提取过去 500 个交易日的拥挤度数据
         recent_congestion = available_market['congestion'].tail(500)
         current_congestion = current_market['congestion']
@@ -806,8 +849,15 @@ def before_exec_fn(ctx_map):
         dynamic_threshold = recent_congestion.quantile(0.99)
         # 熔断开关
         congestion_too_high = (current_congestion > dynamic_threshold)
-            
-        mkt_status = is_market_ok.scenario_based_market_judgment(current_dt, zzqz_df, GLOBAL_MARKET_STATS,len(ctx_map))
+
+        shadow_row, shadow_miss = _shadow_scenario(current_dt)
+        global _SHADOW_MISS_WARNED
+        if shadow_miss and not _SHADOW_MISS_WARNED:
+            logging.warning("[shadow] 存在标签缺失日期, 缺失日回退现役 is_market_ok 判定")
+            _SHADOW_MISS_WARNED = True
+        label_source = 'shadow' if shadow_row is not None else 'live'
+        mkt_status = shadow_row or is_market_ok.scenario_based_market_judgment(
+            current_dt, zzqz_df, GLOBAL_MARKET_STATS, len(ctx_map))
         
         current_dt_ts = pd.Timestamp(current_dt).normalize() 
         # 使用 Timestamp 对象直1从字典取值
@@ -831,7 +881,8 @@ def before_exec_fn(ctx_map):
             'position_multiplier': mkt_status['position_multiplier'],
             'decision_reason': mkt_status['decision_reason'],
             'day_limit': day_limit,
-            'daily_ml_threshold': daily_ml_threshold
+            'daily_ml_threshold': daily_ml_threshold,
+            'label_source': label_source
         }
         
     daily_env = _daily_market_cache[current_dt]
@@ -874,7 +925,8 @@ def before_exec_fn(ctx_map):
             f"过硬门槛: {len(daily_candidates)}只 | "
             f"今日限额: {buy_quota}只 | "
             # f"Top3得分: {top_scores}"
-            f"最总过关: {len(daily_env.get('top_x_buys', set()))}只"
+            f"最总过关: {len(daily_env.get('top_x_buys', set()))}只 | "
+            f"标签源: {daily_env['label_source']}"
         )
 
 
