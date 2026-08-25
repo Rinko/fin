@@ -230,10 +230,72 @@ def compare(inc, cha):
         print(f"  [{name}] 分布: {dist_s}")
 
 
+# =========================================================================
+# 解释性审计: 模型预测核心是否可被业务逻辑解释
+# =========================================================================
+FEATURE_GLOSSARY = {
+    'up_ratio': '普涨率(上涨家数占比)', 'high10_ratio': '创10日新高占比',
+    'high20_ratio': '创20日新高占比', 'high60_ratio': '创60日新高占比',
+    'low10_ratio': '创10日新低占比', 'low20_ratio': '创20日新低占比(踩踏广度)',
+    'low60_ratio': '创60日新低占比', 'high_v': '新高家数一阶变化(动能)',
+    'low_v': '新低家数一阶变化', 'low_a_smooth': '新低加速度(平滑)',
+    'high_a_smooth': '新高加速度(平滑)', 'high_ratio': '新高强度(vs 5日均线)',
+    'low_ratio': '新低强度(vs 5日均线)', 'congestion': '成交额Top5%集中度(拥挤度)',
+    'congestion_ma20': '拥挤度20日均线', 'congestion_bias': '拥挤度偏离',
+    'mkt_trend': '大盘趋势因子(252日分位)', 'mkt_vol': '大盘波动因子(252日分位)',
+    'mkt_liq': '大盘流动性因子(252日分位)', 'mkt_bias': '大盘乖离因子(252日分位)',
+    'mkt_position': '大盘位置因子(252日分位)', 'mkt_ret_20': '大盘近20日收益',
+    'mkt_ret_60': '大盘近60日收益',
+    'zz_bias10': '指数乖离MA10', 'zz_bias60': '指数乖离MA60',
+    'zz_mom20': '指数20日动量', 'zz_ret5': '指数5日收益',
+    'zz_vol_ratio': '量能5/20比', 'zz_range20': '20日振幅区间',
+}
+
+
+def explain_heads(X, y_bad, y_up, end_date, top_n=8):
+    """内训全历史(仅用于解读, 不作绩效主张), 回答'模型在看什么':
+    gain 重要性 + TreeSHAP 贡献占比 + 方向(Spearman) + 分位响应曲线。"""
+    train = X[X.index <= pd.Timestamp(end_date)]
+    ok = train.notna().all(axis=1)
+    train = train[ok]
+    feats = list(train.columns)
+
+    for head_name, y in (('p_bad (风险头: fwd20<=-5%)', y_bad), ('p_up (上行头: fwd20>0)', y_up)):
+        yt = y.reindex(train.index).dropna().astype(int)
+        m = lgb.LGBMClassifier(**LGB_PARAMS)
+        m.fit(train.loc[yt.index], yt)
+        booster = m.booster_
+        logit = booster.predict(train.loc[yt.index].values, pred_contrib=True)
+        contrib = np.abs(logit[:, :-1]).mean(axis=0)
+        contrib_share = contrib / max(contrib.sum(), 1e-9)
+        gain = booster.feature_importance(importance_type='gain')
+        gain_share = gain / max(gain.sum(), 1e-9)
+        proba = m.predict_proba(train.loc[yt.index])[:, 1]
+
+        rows = []
+        for i in np.argsort(-contrib_share)[:top_n]:
+            f = feats[i]
+            rho = stats.spearmanr(train.loc[yt.index, f], logit[:, i]).statistic
+            # 分位响应曲线: 特征五分位 -> 平均预测概率
+            qb = pd.qcut(train.loc[yt.index, f].to_numpy(), 5, labels=False, duplicates='drop')
+            curve = pd.Series(np.asarray(proba)).groupby(qb).mean().values
+            rows.append({'特征': f, '业务含义': FEATURE_GLOSSARY.get(f, '?'),
+                         'gain%': f"{gain_share[i] * 100:.1f}",
+                         'SHAP%': f"{contrib_share[i] * 100:.1f}",
+                         '方向': '+' if rho > 0 else '-',
+                         'Q1->Q5响应': ' '.join(f"{v * 100:.0f}%" for v in curve)})
+        banner(f"解释性审计 — {head_name} (截至 {pd.Timestamp(end_date).date()}, 内训仅作解读)")
+        print(pd.DataFrame(rows).to_string(index=False))
+        print("  方向列 = 该特征与预测logit的Spearman符号; Q1->Q5 = 特征从低到高五分位的平均预测概率\n")
+    print("[升级选项] 单调约束版: 将业务先验写为硬约束(如 low20_ratio↑=>p_bad↑, high20_ratio↑=>p_up↑,\n"
+          "      congestion↑=>p_bad↑), 使模型'不可违反业务常识'成为构造性保证而非事后检验。")
+
+
 def main():
     ap = argparse.ArgumentParser(description='五象限场景标签挑战者对比')
     ap.add_argument('--start', default='2021-01-01')
     ap.add_argument('--end', default=None)
+    ap.add_argument('--explain', action='store_true', help='输出驱动因子解释性审计')
     ap.add_argument('--out', default=os.path.join('external_data', 'scenario_audit'))
     args = ap.parse_args()
 
@@ -272,6 +334,9 @@ def main():
     p = os.path.join(args.out, 'labels_challenger.csv')
     cha.to_csv(p, encoding='utf-8-sig')
     print(f"\n[challenger] 挑战者标签已保存: {p}")
+
+    if args.explain:
+        explain_heads(X, y_bad, y_up, end_date=eval_dates[-1])
 
 
 if __name__ == '__main__':
