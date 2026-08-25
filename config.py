@@ -12,10 +12,10 @@ import os
 
 # ---- 生产现役模型（ALIGN 四件套）----
 MODELS = {
-    'ENTRY_MODEL_PKL':  'chip_accumulation_v6_g_pca1_z.pkl',
-    'RISK_MODEL_PKL':   'chip_risk_model_v1_g_pca1_z.pkl',
-    'OPPORT_PKL':       'chip_opport_magnitude_excess_for_g.pkl',
-    'RISKMAG_PKL':      'chip_risk_magnitude_for_g.pkl',
+    'ENTRY_MODEL_PKL':  'chip_accumulation_v6_g_pca1_z_hfq.pkl',
+    'RISK_MODEL_PKL':   'chip_risk_model_v1_g_pca1_z_hfq.pkl',
+    'OPPORT_PKL':       'chip_opport_magnitude_excess_for_g_hfq.pkl',
+    'RISKMAG_PKL':      'chip_risk_magnitude_for_g_hfq.pkl',
 }
 
 # ---- 全量受管键与生产默认值 ----
