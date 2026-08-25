@@ -71,8 +71,9 @@ def build_features(breadth_df, zzqz_df):
     return X.replace([np.inf, -np.inf], np.nan)
 
 
-def walkforward_predict(X, y_bad, y_up, eval_dates):
-    """季度走前预测 p_bad / p_up (仅用 <t-EMBARGO 信息训练)。"""
+def walkforward_predict(X, y_bad, y_up, eval_dates, mono=None):
+    """季度走前预测 p_bad / p_up (仅用 <t-EMBARGO 信息训练)。
+    mono: {'p_bad': 约束列表|None, 'p_up': ...} 与 X 列对齐的单调约束。"""
     cal = X.index
     pos = {d: i for i, d in enumerate(cal)}
     preds = pd.DataFrame(index=cal, columns=['p_bad', 'p_up'], dtype=float)
@@ -96,7 +97,11 @@ def walkforward_predict(X, y_bad, y_up, eval_dates):
             continue
         for col, y in (('p_bad', y_bad), ('p_up', y_up)):
             ytr = y.reindex(Xtr.index).dropna().astype(int)
-            m = lgb.LGBMClassifier(**LGB_PARAMS)
+            params = dict(LGB_PARAMS)
+            if mono and mono.get(col):
+                assert len(mono[col]) == X.shape[1], '单调约束长度须等于特征数'
+                params['monotone_constraints'] = list(mono[col])
+            m = lgb.LGBMClassifier(**params)
             m.fit(Xtr.loc[ytr.index], ytr)
             Xt = X.loc[[d for d in test_dates if d in pos]]
             ok_t = Xt.notna().all(axis=1)
@@ -190,44 +195,155 @@ def _sc_mean_p(lab, sc):
     return a.mean(), stats.mannwhitneyu(a, r, alternative='two-sided').pvalue
 
 
-def compare(inc, cha):
+def compare(labels_map):
+    """labels_map: {显示名: labels_df}; 列动态扩展。"""
+    names = list(labels_map)
     rows = []
-    def add(name, v1, v2, fmt="{:.3f}"):
+    def add(name, vals, fmt="{:.3f}"):
         rows.append({'指标': name,
-                     '现役决策树': "n/a" if pd.isna(v1) else fmt.format(v1),
-                     '挑战者LGBM': "n/a" if pd.isna(v2) else fmt.format(v2)})
+                     **{n: ("n/a" if pd.isna(v) else fmt.format(v)) for n, v in zip(names, vals)}})
 
-    add('eta^2(fwd20)', eta_squared(inc['fwd20'], inc['primary_scenario']),
-        eta_squared(cha['fwd20'], cha['primary_scenario']), "{:.4f}")
-    add('翻转率', _flip_rate(inc['primary_scenario']), _flip_rate(cha['primary_scenario']), "{:.1%}")
-    add('<=3天短段占比', _short_run_share(inc['primary_scenario']),
-        _short_run_share(cha['primary_scenario']), "{:.1%}")
-    r1, p1 = _tail_stats(inc)
-    r2, p2 = _tail_stats(cha)
-    add('尾部捕获 recall(risk|caution)', r1, r2, "{:.1%}")
-    add('尾部捕获 precision(risk|caution)', p1, p2, "{:.1%}")
+    labs = list(labels_map.values())
+    add('eta^2(fwd20)', [eta_squared(l['fwd20'], l['primary_scenario']) for l in labs], "{:.4f}")
+    add('翻转率', [_flip_rate(l['primary_scenario']) for l in labs], "{:.1%}")
+    add('<=3天短段占比', [_short_run_share(l['primary_scenario']) for l in labs], "{:.1%}")
+    tails = [_tail_stats(l) for l in labs]
+    add('尾部捕获 recall(risk|caution)', [t[0] for t in tails], "{:.1%}")
+    add('尾部捕获 precision(risk|caution)', [t[1] for t in tails], "{:.1%}")
     for sc in ['bottom', 'opportunity', 'risk']:
-        m1, _ = _sc_mean_p(inc, sc)
-        m2, _ = _sc_mean_p(cha, sc)
-        add(f'{sc} mean_fwd20', m1, m2, "{:+.2%}")
-    _, pm1 = _sc_mean_p(inc, 'bottom')
-    _, pm2 = _sc_mean_p(cha, 'bottom')
-    add('bottom MWU p 值(vs 其余)', pm1, pm2, "{:.3f}")
-
-    dist1 = inc['primary_scenario'].value_counts(normalize=True).to_dict()
-    dist2 = cha['primary_scenario'].value_counts(normalize=True).to_dict()
-    agree = (inc['primary_scenario'].reindex(cha.index)
-             == cha['primary_scenario']).mean()
+        add(f'{sc} mean_fwd20', [_sc_mean_p(l, sc)[0] for l in labs], "{:+.2%}")
+    add('bottom MWU p 值(vs 其余)', [_sc_mean_p(l, 'bottom')[1] for l in labs], "{:.3f}")
 
     banner("Champion-Challenger 并排对比 (同区间同口径)")
     print(pd.DataFrame(rows).to_string(index=False))
-    print(f"\n场景分布 TV 距离: {tv_distance(dist1, dist2):.3f} | 两标签逐日一致率: {fmt_pct(agree)}")
+    base_name, base_lab = names[0], labs[0]
+    for n, l in zip(names[1:], labs[1:]):
+        d1 = base_lab['primary_scenario'].value_counts(normalize=True).to_dict()
+        d2 = l['primary_scenario'].value_counts(normalize=True).to_dict()
+        agree = (base_lab['primary_scenario'].reindex(l.index) == l['primary_scenario']).mean()
+        print(f"  [{n}] vs {base_name}: 分布TV={tv_distance(d1, d2):.3f} | 逐日一致率={fmt_pct(agree)}")
     print("\n解读: 挑战者若在 eta^2/尾部捕获上占优且翻转率不升高, 即具备影子替换资格;")
     print("      正式切换前应将其接入 backtest 影子跑一轮完整组合回测再定。")
-    for name, lab in (('现役', inc), ('挑战者', cha)):
+    for name, lab in labels_map.items():
         cnt = lab['primary_scenario'].value_counts()
         dist_s = ' '.join(f"{s}:{cnt.get(s, 0)}" for s in SCENARIOS)
         print(f"  [{name}] 分布: {dist_s}")
+
+
+# =========================================================================
+# 业务不变量验收 (标签层, 对所有标签器对称适用)
+# =========================================================================
+def biz_invariant_checks(lab, breadth_df, zzqz_df):
+    """按业务经验对'标签'做不变量测试 (与模型内部无关):
+    B1 拥挤尖峰: congestion > 过去500日Q99(与回测熔断同口径)的日子,
+       被标 risk|caution 的比例应显著高于常态日 —— '拥挤过高=不健康'。
+    B2 动量中性: mom20 极端五分位(高/低)日的场景分布不应被单一场景吸收
+       —— '动量强单独不构成方向决断'。
+    B3 踩踏广度: low20_ratio > 过去Q90 的日子, 不应集中标注 bottom/opportunity。
+    返回 {测试名: (数值描述, PASS/FAIL/WARN)}。"""
+    res = {}
+    idx = lab.index
+
+    # --- B1 拥挤尖峰 ---
+    cong = breadth_df['congestion'].reindex(idx)
+    thr99 = breadth_df['congestion'].rolling(500, min_periods=250).quantile(0.99).shift(1).reindex(idx)
+    spike = (cong > thr99).fillna(False)
+    flag = lab['primary_scenario'].isin(['risk', 'caution'])
+    p_flag_spike = flag[spike].mean() if spike.sum() else np.nan
+    p_flag_base = flag.mean()
+    if spike.sum() >= 10:
+        z = (p_flag_spike - p_flag_base) / np.sqrt(p_flag_base * (1 - p_flag_base) / spike.sum())
+        res['B1 拥挤尖峰->防御标签'] = (
+            f"P(防|尖峰)={fmt_pct(p_flag_spike)} vs 基率={fmt_pct(p_flag_base)} "
+            f"(n={int(spike.sum())}, z={z:+.1f})",
+            'PASS' if z > 1.645 else 'FAIL')
+    else:
+        res['B1 拥挤尖峰->防御标签'] = (f"尖峰样本不足(n={int(spike.sum())})", 'WARN')
+
+    # --- B2 动量中性 (业务口径: 动量'强'单独不构成方向决断 -> 仅检验高端;
+    #     低动量端偏防御属常识, 只输出信息不判定) ---
+    mom = zzqz_df['close'].pct_change(20).reindex(idx)
+    mom_rank = mom.expanding(min_periods=250).rank(pct=True)
+    top = (mom_rank >= 0.8).fillna(False)
+    overall = lab['primary_scenario'].value_counts(normalize=True)
+    sub = lab.loc[top, 'primary_scenario']
+    if len(sub) >= 30:
+        d = sub.value_counts(normalize=True).reindex(overall.index).fillna(0)
+        n = len(sub)
+        z_risk = (d.get('risk', 0) - overall.get('risk', 0)) / np.sqrt(
+            max(overall.get('risk', 0) * (1 - overall.get('risk', 0)), 1e-9) / n)
+        z_opp = (d.get('opportunity', 0) - overall.get('opportunity', 0)) / np.sqrt(
+            max(overall.get('opportunity', 0) * (1 - overall.get('opportunity', 0)), 1e-9) / n)
+        tv = tv_distance(d.to_dict(), overall.to_dict())
+        ok = (abs(z_risk) < 1.645) and (abs(z_opp) < 1.645)
+        res['B2 动量强->不定方向'] = (
+            f"mom高五分位(n={n}): risk z={z_risk:+.1f} opp z={z_opp:+.1f} "
+            f"|risk]={fmt_pct(d.get('risk', 0), 0)} [opp]={fmt_pct(d.get('opportunity', 0), 0)}",
+            'PASS' if ok else 'FAIL')
+    else:
+        res['B2 动量强->不定方向'] = (f"样本不足", 'WARN')
+
+    # --- B3 踩踏广度 ---
+    l20r = breadth_df['low20_ratio'].reindex(idx)
+    q90 = breadth_df['low20_ratio'].rolling(120, min_periods=30).quantile(0.9).shift(1).reindex(idx)
+    stampede = (l20r > q90).fillna(False)
+    bull_lab = lab['primary_scenario'].isin(['bottom', 'opportunity'])
+    if stampede.sum() >= 10:
+        p_bull_stamp = bull_lab[stampede].mean()
+        p_bull_base = bull_lab.mean()
+        res['B3 踩踏广度->禁进攻标签'] = (
+            f"P(进|踩踏)={fmt_pct(p_bull_stamp)} vs 基率={fmt_pct(p_bull_base)}",
+            'PASS' if p_bull_stamp <= p_bull_base * 1.1 else 'FAIL')
+    else:
+        res['B3 踩踏广度->禁进攻标签'] = (f"样本不足(n={int(stampede.sum())})", 'WARN')
+    return res
+
+
+def print_biz_checks(checks_map):
+    banner("业务不变量验收 (标签层; 判据来自业务经验, 对各标签器对称)")
+    names = list(checks_map)
+    tests = list(next(iter(checks_map.values())).keys())
+    hdr = f"{'测试':26s} " + " ".join(f"{n:>22s}" for n in names)
+    print(hdr)
+    for t in tests:
+        cells = []
+        for n in names:
+            desc, verdict = checks_map[n][t]
+            cells.append(f"[{verdict}] {desc:>16s}")
+        print(f"{t:26s} " + " ".join(f"{c:>24s}" for c in cells))
+    print("\n说明: B1/B3 为单向假设检验(业务方向明确); B2 为中性检验(动量单独不定方向)。")
+
+
+def build_hinge_features(X):
+    """铰链特征改造: 业务效应是分段形(危险区在'过高段')而非全局单调。
+    以因果锚点(过去250日中位数/分位, shift1 防泄漏)切出铰链段,
+    仅对铰链段施加单调约束 —— '业务定边界与方向, 段内数据说话'。"""
+    Xh = X.copy()
+
+    def hinge(s, base, direction):
+        # direction=+1: 取超出锚点的上段; -1: 取低于锚点的下段
+        return ((s - base) if direction > 0 else (base - s)).clip(lower=0)
+
+    cong = Xh['congestion']
+    base_c = cong.shift(1).rolling(250, min_periods=60).median()
+    Xh['cong_excess'] = hinge(cong, base_c, +1)   # 拥挤过高段
+    Xh['cong_gap'] = hinge(cong, base_c, -1)      # 拥挤崩塌段
+    c20 = Xh['congestion_ma20']
+    b20 = c20.shift(1).rolling(250, min_periods=60).median()
+    Xh['cong20_excess'] = hinge(c20, b20, +1)
+    Xh['cong20_gap'] = hinge(c20, b20, -1)
+    mom = Xh['zz_mom20']
+    q80 = mom.shift(1).rolling(250, min_periods=60).quantile(0.8)
+    q20 = mom.shift(1).rolling(250, min_periods=60).quantile(0.2)
+    Xh['mom_hi'] = hinge(mom, q80, +1)            # 动量极端上段 (约束置0: 单独不定方向)
+    Xh['mom_lo'] = hinge(mom, q20, -1)
+
+    Xh = Xh.drop(columns=['congestion', 'congestion_ma20', 'zz_mom20'])
+    BAD_POS = ['cong_excess', 'cong_gap', 'cong20_excess', 'cong20_gap',
+               'low20_ratio', 'mkt_vol', 'zz_range20']
+    mono_bad = [1 if c in BAD_POS else 0 for c in Xh.columns]
+    mono_up = [-v for v in mono_bad]
+    return Xh, mono_bad, mono_up
 
 
 # =========================================================================
@@ -296,6 +412,8 @@ def main():
     ap.add_argument('--start', default='2021-01-01')
     ap.add_argument('--end', default=None)
     ap.add_argument('--explain', action='store_true', help='输出驱动因子解释性审计')
+    ap.add_argument('--hinge', action='store_true',
+                    help='追加铰链特征+分段单调约束变体 (业务定边界, 段内数据说话)')
     ap.add_argument('--out', default=os.path.join('external_data', 'scenario_audit'))
     args = ap.parse_args()
 
@@ -328,12 +446,33 @@ def main():
     inc = label_days(eval_dates, zzqz_df, breadth_df, judge,
                      total_stocks=None, use_dynamic=True)
 
-    compare(inc, cha)
+    labels_map = {'现役决策树': inc, '自由LGBM': cha}
+    out_extra = {}
+
+    if args.hinge:
+        Xh, mono_bad, mono_up = build_hinge_features(X)
+        print("[challenger] 铰链约束变体走前拟合中...")
+        preds_h = walkforward_predict(Xh, y_bad, y_up, eval_dates,
+                                      mono={'p_bad': mono_bad, 'p_up': mono_up})
+        chh = map_scenarios(preds_h, zzqz_df)
+        chh = chh[chh.index.isin(eval_dates)]
+        labels_map['铰链约束LGBM'] = chh
+        out_extra['labels_challenger_hinge.csv'] = chh
+
+    compare(labels_map)
+
+    checks_map = {n: biz_invariant_checks(l, breadth_df, zzqz_df)
+                  for n, l in labels_map.items()}
+    print_biz_checks(checks_map)
 
     os.makedirs(args.out, exist_ok=True)
     p = os.path.join(args.out, 'labels_challenger.csv')
     cha.to_csv(p, encoding='utf-8-sig')
     print(f"\n[challenger] 挑战者标签已保存: {p}")
+    for fname, lab_df in out_extra.items():
+        pf = os.path.join(args.out, fname)
+        lab_df.to_csv(pf, encoding='utf-8-sig')
+        print(f"[challenger] 变体标签已保存: {pf}")
 
     if args.explain:
         explain_heads(X, y_bad, y_up, end_date=eval_dates[-1])
