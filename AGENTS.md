@@ -1,172 +1,92 @@
 # AGENTS.md — Fin 量化交易系统
 
-> 📌 **日常操作与现役配置速查 → [USAGE.md](USAGE.md)**（先读它，再读本文件其余部分）
+> 📌 **业务操作速查 → [USAGE.md](USAGE.md)**（先读它） | 探索日志 → [EXPLORE_LOG.md](EXPLORE_LOG.md) | 更早归档 → ARCHIVE_SUMMARY.md
 
 ## 项目概述
-中国 A 股量化选股系统，基于 LightGBM 的机器学习选股 + 市场状态检测。
+中国 A 股量化选股系统。LightGBM 四模型架构（入场排名 + 风控排名 + 机会幅度 + 风险幅度）+ 五象限市场状态检测 + PyBroker 回测。
 
-## 探索归档状态
-- **现役生产**：ALIGN 四件套 + 场景化 quota（2026-08-23 切换）——配置/成绩/回滚见 **[USAGE.md](USAGE.md)**
-- 历史探索逐日流水 → **[EXPLORE_LOG.md](EXPLORE_LOG.md)**；2026-08-14 前归档 → `ARCHIVE_SUMMARY.md` + git tag `archive/explore/*`
-- 已验证不可行方向（勿重做）：LambdaRank 全变体、open-entry target、combo3 特征、④hold-dd target（管线尺度未决）、训练集基础过滤、轻量打分管线直接对比
+## 现役生产配置（2026-08-23 切换）
 
-## 外接盘存储 (2TB)
-- `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
-- **所有大文件一律写外接盘**（审计 CSV、实验模型、回测结果），禁止写系统盘
-- 审计 CSV (~15GB/个) 保存到 `external_data/audit/`，避免反复重训
-- 生产核心文件（源码、现役模型 pkl）留在项目根
+- **模型**：ALIGN 四件套（详见 [USAGE.md](USAGE.md)）
+- **③ sizing 参数**：`OPPORT_HURDLE=0.02 / OPPORT_SIZING_COEFF=0.30 / clip[0.4,1.8]`（网格标定最优）
+- **场景化 quota**：risk=0 / normal=2 / caution=3 / bottom=opp=5
+- **floor**：全关；**仓位基准**：0.04；**初始资金口径**：1M
+- 同口径成绩 vs 旧四件套：127.6% vs 111.6%，Sharpe 1.41 vs 1.27
 
-## 探索文件管理
-- 探索脚本（gate_*.py, train_*_{variant}.py, analyze_*.py, run_*backtest*.py）→ `external_data/explore_night/scripts/`
-- 运行方式：`PYTHONPATH=. python external_data/explore_night/scripts/xxx.py`（cwd=项目根）
-- 确认采纳（gate PASS + 回测提升）后才并入项目根；FAIL 的留在外接盘
-- 探索过程文件（日志/报告/gate JSON/回测对比）→ `external_data/explore_night/<stage>/`，留存避免重复计算
-- 非现役/实验模型 pkl → `external_data/models/`；现役 pkl 留项目根
-- 生产文件上的探索改动，未采纳时必须回滚
-- **每个探索方向用独立 git 分支**（`explore/<name>`），不污染 main
-
-## 架构
-```
-main.py → screen.py → backtest.py
-                      ↓
-            signal_engine.py (买入/卖出/仓位规则)
-            co_compute.py (特征工程)
-            is_market_ok.py (市场状态)
-            local_data_cache.py (SQLite 缓存)
-            stock_fetcher_bao.py (BaoStock API)
-
-generate_signals.py      # 输出每日全量候选信号 CSV
-signal_level_backtest.py # 固定本金 per trade 评估模型+规则
-```
-
-## 架构原则：训练与回测必须走 `co_compute.py` 公共模块
-
-- `co_compute.py` 是唯一的特征工程、标准化与目标生成入口。所有训练脚本、回测脚本、探索脚本必须使用：
-  - `co_compute.compute_individual_indicators` 生成个股特征
-  - `co_compute.apply_standardization` 做横截面 Z-Score
-  - `co_compute.FeatureConfig` 定义特征集合与市场特征口径
-  - `co_compute.sync_market_context_file` 生成 `market_context_cache.parquet`
-  - `co_compute.build_market_pca_table` 生成或加载大盘 PCA 特征
-- **严禁**在训练/回测脚本中：
-  - 手动读写项目根目录 `market_context_cache.parquet`
-  - monkeypatch `co_compute.build_market_pca_table` 或任何公共函数
-  - 内联重算筹码、标准化、GPR/risk target 等已由 `co_compute` 提供的逻辑
-- 若需使用预计算 PC 表（如 G_pca1_z），通过以下方式之一注册，确保训练与回测使用同一张表：
-  - 设置 `co_compute.FeatureConfig.PC_TABLE_PATH = '<path>.parquet'`
-  - 调用 `co_compute.sync_market_context_file(..., pc_table_path='<path>.parquet')`
-- 违反上述原则会导致训练与回测口径漂移，是模型/回测结果不可复现的主要根因。
-
-
-## 模型评估原则
-
-### 1. 用极简排名基准比较模型
-- 比较不同入场模型时，必须先过**极简排名基准**：保留 ST/股价/流动性/`is_profit_ok` 过滤，剥离场景阈值、floor、大盘过滤、所有卖出规则；
-- 每天按 `ml_rank` 取 top K，次日开盘买入，固定持有 20 天卖出；
-- 通过该基准后，再进入带规则的信号级/组合回测。避免业务规则偏袒某个模型。
-
-### 2. LambdaRank 已验证不可行
-- 在极简基准下，LambdaRank（单阶段/两阶段/截断/20 档细粒度）均显著低于 L2 回归基线；
-- 原因：GPR 排序目标与策略可实现收益存在结构性错位，且 LR 会制造“极少数 jackpot + 大量陷阱”的分数分布，不适合 quota 策略。
-
-### 3. 生产默认规则
-- `BUY_QUOTA_OVERRIDE=5`（每场景 5 只）；
-- floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
-- 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
-
-## 统一入口（2026-08-23 起）
+## 统一入口
 
 ```text
 run.py ── config.apply(line) ──┬─ prod/backtest → main.py(哨兵) → screen → backtest(PyBroker)
 │                               │                   ├─ signal_engine / co_compute / is_market_ok
 ├─ signals → generate_signals   ├─ bench → simple_rank_benchmark（外接盘）
-├─ audit → check_trades / entry / risk / magnitude / signal_level
+├─ audit → check_trades / entry / risk / magnitude / signal_level / exits
+├─ daily  → 轻量每日信号（买入+卖出）
 └─ train  → market_ml + train_magnitude_align（外接盘）
-config.py = 唯一参数源（六业务线 profile；MANAGED_KEYS 全量盖章；其余模块禁止写 env）
+config.py = 唯一参数源（七业务线 profile；MANAGED_KEYS 全量盖章；其余模块禁止写 env）
 ```
 
 ## 常用命令
 ```bash
-python main.py                                    # 每日完整流程
-python get_base_data.py --task all                # 全部数据同步
-python get_base_data.py --task daily --date DATE  # 回填某天
-python run.py audit entry|risk|magnitude          # 模型审计（统一入口）
-python run.py audit trades                        # 交易复盘
+python run.py daily --holdings 持仓.csv   # 每日轻量信号（买入+卖出，分钟级）
+python run.py prod --no-data              # 重路径生产校验（PyBroker 全链）
+python run.py backtest                    # 组合回测（至 BASELINE_END）
+python run.py signals                     # 全量候选导出
+python run.py bench                       # 极简排名基准
+python run.py audit entry|risk|magnitude|trades|exits|signal_level
+python get_base_data.py --task all        # 全部数据同步
 ```
 
+## 架构原则：co_compute 公共模块
+
+- 所有训练/回测/探索脚本必须通过 `co_compute.compute_individual_indicators` + `apply_standardization` + `FeatureConfig` 生成特征
+- 严禁手动读写 `market_context_cache.parquet`、monkeypatch 公共函数、内联重算已有逻辑
+- 违反导致训练与推理口径漂移——是模型不可复现的主要根因
+
+## 模型评估原则
+
+1. **极简排名基准先行**：保留 ST/股价/流动性/is_profit_ok 过滤，剥离全部规则；每天按 ml_rank 取 top K，次日开盘买，持 20 天卖。通过后才进规则回测。
+2. **LambdaRank 已验证不可行**：排序目标与策略可实现收益结构性错位。
+3. **训练确定性**：LGBMRegressor 必须设 `deterministic=True, force_row_wise=True`；已验证双训逐位一致。
+
+## 注意事项（硬性规范）
+
+1. **PyBroker Logger Bug**：backtest.py 修补 PyBroker 源码拼写错误
+2. **Numba JIT**：首次运行慢
+3. **SQLite WAL**：并发读支持
+4. **BaoStock 会话**：错误码自动重连
+5. **特征双通道**：入场平滑版(use_smooth=True)，风控原始版(False)
+6. **前瞻约束**：特征只用当日收盘，交易 buy_delay≥1
+7. **feature_contri**：等权组合（contri=1.0），不单独降权大盘
+8. **市场环境对齐**：每次数据同步后刷新 market_context_cache.parquet
+9. **大盘不降权**：contri=1.0 等权
+10. **PyBroker Warmup**：start = 交易期起点 − warmup 个交易日；区间 < warmup 则无交易
+11. **Live Signal**：仅 run_backtest 结束后末日输出
+12. **模型加载**：backtest.py 不做 import 期加载（哨兵置空）；由入口显式 reload_models() + load_magnitude_models()；直跑 main.py 被 RUN_LINE 哨兵拒绝
+13. **复权口径**：默认前复权(qfq)。所有训练脚本的 adjust 参数必须为 'qfq'，与推理管线一致
+
 ## 关键文件
+
 | 文件 | 用途 |
 |---|---|
-| `backtest.py` | 核心策略逻辑，PyBroker 回测框架 |
-| `signal_engine.py` | 纯信号规则层：买入资格、卖出判断、目标仓位 |
-| `generate_signals.py` | 每日全量候选信号 CSV 生成（无现金/无 quota） |
-| `signal_level_backtest.py` | 固定本金 per trade 信号级回测 |
-| `co_compute.py` | 筹码特征工程，横截面 Z-score 标准化 |
-| `market_ml.py` | LightGBM 训练流水线 |
-| `is_market_ok.py` | 四象限市场状态检测 |
-| `local_data_cache.py` | SQLite 数据缓存 |
-| `stock_fetcher_bao.py` | BaoStock API 封装 |
+| backtest.py | PyBroker 回测框架 |
+| signal_engine.py | 买入资格、卖出判断、目标仓位 |
+| co_compute.py | 特征工程 + 截面标准化 |
+| config.py | 唯一参数源（七业务线 profile） |
+| run.py | 统一 CLI 入口 |
+| generate_signals.py | 全量候选 CSV 导出 |
+| exit_signal.py | 持仓离场信号工具 |
+| check_invariants.py | 每日输出不变量监控 |
+| market_ml.py | LightGBM 训练流水线 |
 
-## 数据流
-1. **数据源**：BaoStock API → SQLite 缓存（`stock_data_cache/`）
-2. **特征**：筹码分布、市场广度、动量指标
-3. **模型**：两个 LightGBM（入场 + 风控），pkl 格式
-4. **状态检测**：四象限（底部/机会/谨慎/正常/风险）
+## 数据层
 
-## ML 模型特征
-- 入场模型：23 特征（21 个股筹码 + 1 复合 + 1 大盘）— `chip_accumulation_v6_g_pca1_z.pkl`
-- 风控模型：25 特征（24 个股筹码含复合 + 1 大盘）— `chip_risk_model_v1_g_pca1_z.pkl`
-- 幅度模型：
-  - 机会幅度（超额收益）— `chip_opport_magnitude_excess_for_g.pkl`
-  - 风险幅度 — `chip_risk_magnitude_for_g.pkl`
-- 大盘特征：G_pca1_z 单主成分 `mkt_macro_regime`（`market_pca_g_pca1_z.parquet`）
-- Z-score 标准化：每日横截面，clip(-3, 3)
-- 复合特征：`profit_bias_div_z` = 获利盘 z − 乖离 z（筹码锁定未透支）
+- SQLite `stock_data_cache/{symbol}.db` + 元数据 stock_data.db
+- 基本面 financial_reports_all.csv
+- 中证全指 zzqz_df.xlsx
+- 大盘上下文 market_context_cache.parquet
 
-## 模型审计
-- **训练后必须审计**：任何模型训练完成后，立即运行对应审计脚本检查预测分布、IC、区分度
-- `run.py audit entry`（audit/check_model_entry.py）：入场模型审计（IC/top-k/特征重要性/全量流式）
-- `run.py audit risk`（audit/check_model_risk.py）：风控模型审计 + 入场/风控协同
-- `audit/check_magnitude_model.py <pkl路径>`：**幅度模型审计**（MSE 压缩检测、日Z-score可用性）
-- `audit/check_data.py` / `check_base_data.py`：数据健壮性审计
-- `audit/check_screen.py` / `check_backtest.py`：海选漏斗审计
-- `audit/check_trades.py` / `check_trades.py`：交易归因审计
-- **审计发现 MSE 压缩（区分度低）时**：幅度模型预测值须做日 Z-score 标准化后才能用于阈值判断
+## 存储
 
-### 审计脚本分类
-| 类型 | 脚本 | 用途 |
-|---|---|---|
-| 模型审计 | `audit/check_model_entry.py` | 入场模型 IC/分箱/特征重要性/衰减 |
-| 模型审计 | `audit/check_model_risk.py` | 风控模型 + 入场/风控协同 |
-| 模型审计 | `audit/check_magnitude_model.py` | **幅度模型** MSE压缩/日Z-score/全量特征重要性 |
-| 数据/策略审计 | `audit/check_data.py` | 数据健壮性 (NaN/Inf/clip/物理边界) |
-| 数据/策略审计 | `audit/check_screen.py` | 海选漏斗 (6层穿透率/配额覆盖) |
-| 数据/策略审计 | `audit/check_trades.py` | 交易归因 (卖飞/摩擦/场景矩阵) |
-
-1. **PyBroker Logger Bug**：`backtest.py:40-49` 修补 PyBroker 源码拼写错误
-2. **Numba JIT**：首次运行慢
-3. **SQLite WAL**：数据缓存用 WAL 模式支持并发读
-4. **BaoStock 会话**：错误码 10001001/10001002 时自动重连
-5. **特征双通道**：入场用平滑版（`use_smooth=True`），风控用原始版
-6. **前瞻约束**：`compute_individual_indicators` 特征只用当日收盘，交易设 `buy_delay>=1`
-7. **feature_contri**：LightGBM 4.6.0 `feature_contri` 真实参数，`gain[i]=max(0,contri[i])*gain[i]`。经最新实验，采用等权组合（所有特征 contri=1.0）替代手动调参，不再对大盘特征单独降权
-8. **市场环境对齐**：训练读 `market_context_cache.parquet`（`sync_market_context_file` 生成，支持 `pc_table_path` 注入预计算 PC），回测实时算，每次数据同步后刷新 parquet
-9. **大盘特征不再强制降权**：历史 `mkt_contri=0.45` 规则已失效；当前默认等权（contri=1.0），让模型自主分配市场/个股特征权重
-10. **PyBroker Warmup**：`start_date = 交易期起点 − warmup 个交易日`（用 zzqz_df.xlsx 交易日历），区间 < warmup 日数则不产生交易
-11. **Live Signal**：只在 `run_backtest` 结束后从末个交易日输出，区间短/股票池小可能无输出
-12. **模型加载**：backtest.py **不再 import 期加载模型**（哨兵置空）；由入口显式调用 `backtest.reload_models()` + `load_magnitude_models()`；直跑 `main.py` 会被 RUN_LINE 哨兵拒绝，统一走 `run.py prod|backtest`
-13. **训练/推理复权口径契约**：所有模型训练脚本的 `adjust` 参数必须与推理管线一致（当前=`'qfq'`）。
-    使用 `adjust='none'` 训练的模型在 qfq 推理时会产生系统性特征值偏移——筹码分布特征对价格绝对水平
-    的处理在两种口径下不同，导致幅度模型的阈值判断完全失效（2026-08-24 hold-dd 实验实证：
-    触发率 92% vs 预期 6%）。新写训练脚本时必须显式检查此项。
-
-## 缓存结构
-- `stock_data_cache/stock_data.db`：元数据 + 复权因子
-- `stock_data_cache/{symbol}.db`：单股 OHLCV（raw_ 前缀）
-- `financial_reports_all.csv`：基本面缓存
-- `zzqz_df.xlsx`：中证全指日线
-
-## 输出文件
-- `results/{timestamp}/`：回测结果
-- `trades.xlsx` / `orders.xlsx`：交易记录
-- `ultimate_trade_audit.xlsx`：入场/出场快照
-- `global_strategy_audit.csv`：每日市场状态决策
+- 现役 pkl + 源码 → 项目根
+- 审计 CSV / 归档模型 / 探索产物 → external_data/（软链接 2TB 外接盘）
+- pkl 晋级时旧版归档至 external_data/models/snapshots/<日期>/

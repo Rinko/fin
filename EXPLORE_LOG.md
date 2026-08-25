@@ -20,4 +20,78 @@
   - 原则沉淀：**幅度模型单位由消费者定义**（阈值型要百分比、缩放型可归一化）；**阈值标定必须全量流式预测**，禁止头部子集样本；**模型×规则冗余时裁撤规则**
   - 幅度训练入口：`external_data/explore_night/signal_level_backtest_20260818/train_magnitude_align.py`（excess_tgt / risk_mag_tgt / hold_dd_tgt 三种 target 可切换；hold-dd 线已挂起）
 - **2026-08-23 生产切换完成**：root 四 pkl 已替换为 ALIGN 组（原四件套归档于 `external_data/models/archive_prod4_20260823/`）；`*_newfeat` 审计符号链接恢复指向生产组合；运行时默认 = ALIGN + 场景化 quota
+- **2026-08-24 市场特征与闸门体系全链审计**（explore/market-diag-20260824, 产物 `external_data/explore_night/market_diag_20260824/`）:
+  - 大盘特征在排名模型中 ΔIC≈0、伪择时（水平漂移零预测力）；三因子历史配置的危害=共线碎片化+churn，非"掩盖"；E0 成对重训确认单主成分价值≤0.1pp
+  - 三硬闸门全量规则终审：**净贡献 +20pp/+0.28Sharpe/-8.3ppDD**；money(预测波动)/cong(预测下跌)为主力，risk 标签无择时信息但经 Market_Risk_Clearance 卖出通道有效——"坏天气砍弱持仓"
+  - 方法论教训：简化重放测规则得出方向相反结论（缺卖出通道）；测规则必须全量环境；删失路径需反事实重建；新增 GATE_* 四开关为闸门验收工具
+  - 详细结论 → 本目录 FINAL_REPORT.md；配置漂移 112.8 vs 127.6 另案排查
+- **2026-08-25 p_harm 统一概率引擎探索（自主会话，已归档）**: 阶段一 logit 校准 AUC 0.61（保序法失败弃用）；阶段二挑战者全线 CI 跨 0.5 触发止损线；全量回测三种消费模式（增强清仓/替代硬闸/连续仓位）全部净负 vs V0 → **结论：现阶段不需要单独大盘模型**，现行三闸为净正贡献在役冠军；GATE_*/PHARM_* 开关保留为验收工具；重启条件见 FINAL_REPORT.md 第四节
+
+
+---
+
+# AGENTS 迁出内容（2026-08-24 瘦身）
+
+## 外接盘存储 (2TB)
+- `external_data/` → 软链接 → `/Volumes/MAC外接/fin_data`（1.8Ti 可用）
+- **所有大文件一律写外接盘**（审计 CSV、实验模型、回测结果），禁止写系统盘
+- 审计 CSV (~15GB/个) 保存到 `external_data/audit/`，避免反复重训
+- 生产核心文件（源码、现役模型 pkl）留在项目根
+
+## 探索文件管理
+- 探索脚本（gate_*.py, train_*_{variant}.py, analyze_*.py, run_*backtest*.py）→ `external_data/explore_night/scripts/`
+- 运行方式：`PYTHONPATH=. python external_data/explore_night/scripts/xxx.py`（cwd=项目根）
+- 确认采纳（gate PASS + 回测提升）后才并入项目根；FAIL 的留在外接盘
+- 探索过程文件（日志/报告/gate JSON/回测对比）→ `external_data/explore_night/<stage>/`，留存避免重复计算
+- 非现役/实验模型 pkl → `external_data/models/`；现役 pkl 留项目根
+- 生产文件上的探索改动，未采纳时必须回滚
+- **每个探索方向用独立 git 分支**（`explore/<name>`），不污染 main
+
+## 架构
+```
+main.py → screen.py → backtest.py
+                      ↓
+            signal_engine.py (买入/卖出/仓位规则)
+            co_compute.py (特征工程)
+            is_market_ok.py (市场状态)
+            local_data_cache.py (SQLite 缓存)
+            stock_fetcher_bao.py (BaoStock API)
+
+generate_signals.py      # 输出每日全量候选信号 CSV
+signal_level_backtest.py # 固定本金 per trade 评估模型+规则
+```
+
+## 架构原则：训练与回测必须走 `co_compute.py` 公共模块
+
+- `co_compute.py` 是唯一的特征工程、标准化与目标生成入口。所有训练脚本、回测脚本、探索脚本必须使用：
+  - `co_compute.compute_individual_indicators` 生成个股特征
+  - `co_compute.apply_standardization` 做横截面 Z-Score
+  - `co_compute.FeatureConfig` 定义特征集合与市场特征口径
+  - `co_compute.sync_market_context_file` 生成 `market_context_cache.parquet`
+  - `co_compute.build_market_pca_table` 生成或加载大盘 PCA 特征
+- **严禁**在训练/回测脚本中：
+  - 手动读写项目根目录 `market_context_cache.parquet`
+  - monkeypatch `co_compute.build_market_pca_table` 或任何公共函数
+  - 内联重算筹码、标准化、GPR/risk target 等已由 `co_compute` 提供的逻辑
+- 若需使用预计算 PC 表（如 G_pca1_z），通过以下方式之一注册，确保训练与回测使用同一张表：
+  - 设置 `co_compute.FeatureConfig.PC_TABLE_PATH = '<path>.parquet'`
+  - 调用 `co_compute.sync_market_context_file(..., pc_table_path='<path>.parquet')`
+- 违反上述原则会导致训练与回测口径漂移，是模型/回测结果不可复现的主要根因。
+
+
+## 模型评估原则
+
+### 1. 用极简排名基准比较模型
+- 比较不同入场模型时，必须先过**极简排名基准**：保留 ST/股价/流动性/`is_profit_ok` 过滤，剥离场景阈值、floor、大盘过滤、所有卖出规则；
+- 每天按 `ml_rank` 取 top K，次日开盘买入，固定持有 20 天卖出；
+- 通过该基准后，再进入带规则的信号级/组合回测。避免业务规则偏袒某个模型。
+
+### 2. LambdaRank 已验证不可行
+- 在极简基准下，LambdaRank（单阶段/两阶段/截断/20 档细粒度）均显著低于 L2 回归基线；
+- 原因：GPR 排序目标与策略可实现收益存在结构性错位，且 LR 会制造“极少数 jackpot + 大量陷阱”的分数分布，不适合 quota 策略。
+
+### 3. 生产默认规则
+- `BUY_QUOTA_OVERRIDE=5`（每场景 5 只）；
+- floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
+- 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
 
