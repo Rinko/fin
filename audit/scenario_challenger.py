@@ -414,11 +414,12 @@ def explain_heads(X, y_bad, y_up, end_date, top_n=8):
           "      congestion↑=>p_bad↑), 使模型'不可违反业务常识'成为构造性保证而非事后检验。")
 
 
-def apply_business_gates(lab, preds, breadth_df, zzqz_df):
+def apply_business_gates(lab, preds, breadth_df, zzqz_df, use_g3=False):
     """纯模型 + 业务公理门控 (映射层安全底线, 预测核心不动):
     G1 拥挤尖峰(cong>过去500日Q99) => 强制防御, 按 p_bad 相对分位选 risk/caution
     G2 opportunity 需广度参与确认(up_ratio>=0.5) —— 动量不单独决断
-    G3 踩踏广度(low20_ratio>过去120日Q90) => 禁攻(bottom/opportunity -> caution)
+    G3 踩踏广度 => 禁攻。默认关闭: 条件尾部验证显示其对'点火+踩踏'重叠日无保护价值
+    (被拦组 P(最深<=-8%)=0% vs 放行组 8%/基线10.9%), --keep-g3 可复现旧口径。
     返回 (gated_lab, 门控触发统计)。"""
     idx = lab.index
     out = lab.copy()
@@ -437,7 +438,7 @@ def apply_business_gates(lab, preds, breadth_df, zzqz_df):
     for d in idx:
         s = out.at[d, 'primary_scenario']
         new, tags = s, []
-        if bool(g3.at[d]) and s in ('bottom', 'opportunity'):
+        if bool(use_g3 and g3.at[d]) and s in ('bottom', 'opportunity'):
             new, _ = 'caution', tags.append('G3踩踏禁攻')
         if bool(g1.at[d]):
             want = 'risk' if (pd.notna(pb_q70.at[d]) and pb.at[d] >= pb_q70.at[d]) else 'caution'
@@ -459,6 +460,81 @@ def apply_business_gates(lab, preds, breadth_df, zzqz_df):
     return out
 
 
+def _window_path_stats(price, dates, horizon=20):
+    """每个日期的前向路径统计: (终值收益, 窗口内最深单点收益, 窗口内最大回撤)。"""
+    pos = {d: i for i, d in enumerate(price.index)}
+    v = price.to_numpy()
+    rows = {}
+    for d in dates:
+        i = pos.get(d)
+        if i is None or i + horizon >= len(v):
+            continue
+        w = v[i + 1:i + horizon + 1]
+        p0 = v[i]
+        peak = np.maximum.accumulate(np.concatenate([[p0], w]))[1:]
+        rows[d] = (w[-1] / p0 - 1, float((w / p0 - 1).min()), float((w / peak - 1).min()))
+    return pd.DataFrame(rows, index=['term', 'worst', 'mdd']).T
+
+
+def g3_tail_check(base_lab, breadth_df, zzqz_df, ew_ret=None, horizon=20,
+                  deep=-0.08):
+    """B3 去留裁决证据: 被 G3 拦掉的进攻日是否真有更高的尾部风险?
+    对比 [被拦进攻日 | 放行进攻日 | 踩踏全日 | 全样本], 指数与等权双域;
+    并按踩踏加速度(low_v 符号)细分 —— 减速踩踏可能是买点而非风险。"""
+    idx = base_lab.index
+    l20r = breadth_df['low20_ratio'].reindex(idx)
+    q90 = breadth_df['low20_ratio'].rolling(120, min_periods=30).quantile(0.9).shift(1).reindex(idx)
+    stampede = (l20r > q90).fillna(False)
+    lowv = breadth_df['low_v'].reindex(idx)
+    attack = base_lab['primary_scenario'].isin(['bottom', 'opportunity'])
+
+    groups = {
+        '被拦进攻日': attack & stampede,
+        '放行进攻日': attack & ~stampede,
+        '踩踏全日': stampede,
+        '全样本': pd.Series(True, index=idx),
+    }
+    banner(f"B3 条件尾部验证 (窗口={horizon}日, 深跌线={deep:.0%})")
+
+    domains = {'指数': zzqz_df['close']}
+    if ew_ret is not None:
+        domains['等权'] = (1 + ew_ret.reindex(zzqz_df.index).fillna(0)).cumprod()
+
+    rows = []
+    for dom_name, price in domains.items():
+        ps = _window_path_stats(price, idx, horizon)
+        for g_name, mask in groups.items():
+            sub = ps.loc[[d for d in idx if bool(mask.get(d, False)) and d in ps.index]].dropna()
+            if sub.empty:
+                continue
+            rows.append({'域': dom_name, '组': g_name, 'n': len(sub),
+                         '终值均值': f"{sub['term'].mean():+.2%}",
+                         '胜率': fmt_pct((sub['term'] > 0).mean()),
+                         '最深回撤中位': f"{sub['mdd'].median():.2%}",
+                         f"P(最深<= {deep:.0%})": fmt_pct((sub['worst'] <= deep).mean()),
+                         "P(终值<=-5%)": fmt_pct((sub['term'] <= -0.05).mean()),
+                         '终值P5': f"{sub['term'].quantile(0.05):+.2%}"})
+    print(pd.DataFrame(rows).to_string(index=False))
+
+    # 细分: 踩踏加速度方向 (仅指数域, 决策参考)
+    acc = (lowv > 0).fillna(False)
+    ps = _window_path_stats(zzqz_df['close'], idx, horizon)
+    print("\n[踩踏 x 加速度细分] (指数域, 进攻标签日内)")
+    sub_rows = []
+    for nm, m in (('加速踩踏(low_v>0)', attack & stampede & acc),
+                  ('减速踩踏(low_v<=0)', attack & stampede & ~acc)):
+        sub = ps.loc[[d for d in idx if bool(m.get(d, False)) and d in ps.index]].dropna()
+        if sub.empty:
+            continue
+        sub_rows.append({'组': nm, 'n': len(sub),
+                         '终值均值': f"{sub['term'].mean():+.2%}",
+                         f"P(最深<= {deep:.0%})": fmt_pct((sub['worst'] <= deep).mean()),
+                         '最深回撤中位': f"{sub['mdd'].median():.2%}"})
+    print(pd.DataFrame(sub_rows).to_string(index=False))
+    print("\n裁决指引: 若被拦组的 P(最深<=深跌线)/回撤并不高于放行组, B3 的保护价值"
+          "\n          不成立, 应降级或改为'仅加速踩踏禁攻'; 反之保留为硬公理。")
+
+
 def main():
     ap = argparse.ArgumentParser(description='五象限场景标签挑战者对比')
     ap.add_argument('--start', default='2021-01-01')
@@ -466,6 +542,10 @@ def main():
     ap.add_argument('--explain', action='store_true', help='输出驱动因子解释性审计')
     ap.add_argument('--hinge', action='store_true',
                     help='追加铰链特征+分段单调约束变体 (业务定边界, 段内数据说话)')
+    ap.add_argument('--g3check', action='store_true',
+                    help='B3 条件尾部验证 (被拦进攻日的尾部风险 vs 放行组)')
+    ap.add_argument('--keep-g3', action='store_true',
+                    help='门控中保留 G3 踩踏禁攻 (默认已依据尾部验证移除)')
     ap.add_argument('--out', default=os.path.join('external_data', 'scenario_audit'))
     args = ap.parse_args()
 
@@ -492,7 +572,8 @@ def main():
     preds = walkforward_predict(X, y_bad, y_up, eval_dates)
     cha = map_scenarios(preds, zzqz_df)
     cha = cha[cha.index.isin(eval_dates)]
-    gate = apply_business_gates(cha.copy(), preds, breadth_df, zzqz_df)
+    gate = apply_business_gates(cha.copy(), preds, breadth_df, zzqz_df,
+                                use_g3=args.keep_g3)
 
     judge = is_market_ok.scenario_based_market_judgment
     print("[challenger] 现役基线打标中...")
@@ -501,6 +582,12 @@ def main():
 
     labels_map = {'现役决策树': inc, '自由LGBM': cha, '门控LGBM(参照)': gate}
     out_extra = {'labels_challenger_gated.csv': gate}
+
+    if args.g3check:
+        from audit.check_scenario import build_ew_return_series
+        ew = build_ew_return_series(
+            cache_path=os.path.join(args.out, 'ew_daily_returns.csv'))
+        g3_tail_check(cha, breadth_df, zzqz_df, ew_ret=ew)
 
     if args.hinge:
         Xh, mono_bad, mono_up = build_hinge_features(X)
