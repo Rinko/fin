@@ -20,7 +20,7 @@ LINES = ('prod', 'backtest', 'signals', 'bench', 'audit')
 
 def _dispatch_audit(rest):
     mapping = {
-        'trades':       'check_trades.py',
+        'trades':       'audit/check_trades.py',
         'entry':        'audit/check_model_entry.py',
         'risk':         'audit/check_model_risk.py',
         'magnitude':    'audit/check_magnitude_model.py',

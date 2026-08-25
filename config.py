@@ -25,11 +25,12 @@ DEFAULTS = {
     'POS_MULT_WEIGHT':  '0.5',
     'POS_MULT_BIAS':    '0.5',
     'OPPORT_SIZING_COEFF': '0.30',
-    'OPPORT_SIZING_MIN':   '0.5',   # 生产锚点口径(main直跑引擎默认)
-    'OPPORT_SIZING_MAX':   '1.5',
+    'OPPORT_SIZING_MIN':   '0.4',   # 历史生产裁剪带(全部锚点基线口径)
+    'OPPORT_SIZING_MAX':   '1.8',
     'OPPORT_HURDLE':       '0.02',
     # 风控退出
-    'RISK_MAG_SELL_THRESHOLD': '-0.05',
+    'RISK_MAG_SELL_THRESHOLD': '-0.055',  # hfq④校准: 对齐旧模型7.3%触发率
+    'OPPORT_PRED_OFFSET': '-0.0063',      # hfq③校准: 中位对齐旧超额语义
     # ml_rank floor（默认全关）
     'ML_RANK_FLOOR_BOTTOM': '0.0', 'ML_RANK_FLOOR_OPPORTUNITY': '0.0',
     'ML_RANK_FLOOR_NORMAL': '0.0', 'ML_RANK_FLOOR_CAUTION': '0.0',
