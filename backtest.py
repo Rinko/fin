@@ -457,9 +457,10 @@ class AKShareChipDataSource(DataSource):
 
         # 3.5) 可选：幅度模型推理
         if trained_opport_mag_lgbm is not None:
+            _opp_off = float(os.environ.get('OPPORT_PRED_OFFSET', '0') or 0)
             final_df_smooth['opport_mag'] = trained_opport_mag_lgbm.predict(
                 final_df_smooth[opport_mag_features]
-            )
+            ) + _opp_off
         if trained_risk_mag_lgbm is not None:
             final_df_smooth['risk_mag'] = trained_risk_mag_lgbm.predict(
                 final_df_raw[risk_mag_features]
