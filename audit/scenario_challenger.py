@@ -414,12 +414,14 @@ def explain_heads(X, y_bad, y_up, end_date, top_n=8):
           "      congestion↑=>p_bad↑), 使模型'不可违反业务常识'成为构造性保证而非事后检验。")
 
 
-def apply_business_gates(lab, preds, breadth_df, zzqz_df, use_g3=False):
+def apply_business_gates(lab, preds, breadth_df, zzqz_df, use_g3=True):
     """纯模型 + 业务公理门控 (映射层安全底线, 预测核心不动):
     G1 拥挤尖峰(cong>过去500日Q99) => 强制防御, 按 p_bad 相对分位选 risk/caution
     G2 opportunity 需广度参与确认(up_ratio>=0.5) —— 动量不单独决断
-    G3 踩踏广度 => 禁攻。默认关闭: 条件尾部验证显示其对'点火+踩踏'重叠日无保护价值
-    (被拦组 P(最深<=-8%)=0% vs 放行组 8%/基线10.9%), --keep-g3 可复现旧口径。
+    G3 踩踏广度(low20_ratio>过去120日Q90) => 禁攻(bottom/opportunity -> caution)
+    G3 曾依据指数域 fwd20 尾部验证短暂移除, 但组合级影子回测证明该验证口径有误:
+      策略实际持有微盘偏好组合、平均仅 ~7 根 bar(非 20 日), 2024-01 微盘踩踏中
+      无 G3 时 bottom 连续 quota=5 抄底 -> 回撤 -25.4% vs 现役 -14.7%。故默认恢复。
     返回 (gated_lab, 门控触发统计)。"""
     idx = lab.index
     out = lab.copy()
@@ -544,8 +546,8 @@ def main():
                     help='追加铰链特征+分段单调约束变体 (业务定边界, 段内数据说话)')
     ap.add_argument('--g3check', action='store_true',
                     help='B3 条件尾部验证 (被拦进攻日的尾部风险 vs 放行组)')
-    ap.add_argument('--keep-g3', action='store_true',
-                    help='门控中保留 G3 踩踏禁攻 (默认已依据尾部验证移除)')
+    ap.add_argument('--no-g3', action='store_true',
+                    help='禁用 G3 踩踏禁攻门 (消融用; 默认启用, 组合级证据支持)')
     ap.add_argument('--out', default=os.path.join('external_data', 'scenario_audit'))
     args = ap.parse_args()
 
@@ -573,7 +575,7 @@ def main():
     cha = map_scenarios(preds, zzqz_df)
     cha = cha[cha.index.isin(eval_dates)]
     gate = apply_business_gates(cha.copy(), preds, breadth_df, zzqz_df,
-                                use_g3=args.keep_g3)
+                                use_g3=not args.no_g3)
 
     judge = is_market_ok.scenario_based_market_judgment
     print("[challenger] 现役基线打标中...")
