@@ -346,8 +346,9 @@ def post_exit_audit(trades_path=None, debug_path=DEFAULT_DEBUG):
 
 
 def run_trade_audit():
-    god_mode_auditor_v10()
-    post_exit_audit()
+    _tp = os.environ.get('AUDIT_TRADES_PATH') or None
+    god_mode_auditor_v10(trades_path=_tp)
+    post_exit_audit(trades_path=_tp)
 
 
 if __name__ == "__main__":
