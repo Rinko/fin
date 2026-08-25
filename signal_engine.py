@@ -64,7 +64,7 @@ def check_buy_eligibility_and_score(ctx, daily_env):
     - ml_rank: float (越低代表模型打分越高)
     - audit: dict (用于信号审计)
     """
-    if len(ctx.close) < 90 or ctx.close[-1] <= 2:
+    if len(ctx.close) < 90:
         return False, 1.0, {}
 
     scenario = daily_env['primary_scenario']

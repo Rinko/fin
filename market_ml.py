@@ -130,8 +130,8 @@ class AccumulationTrainer:
 
         for i, s in enumerate(symbols):
             try:
-                # 读取前复权数据，与回测保持一致
-                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="qfq", mode=2)
+                # 读取后复权数据，与回测保持一致
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="hfq", mode=2)
                 if df.empty or len(df) < 150: continue
                 df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)
@@ -169,10 +169,9 @@ class AccumulationTrainer:
         # 与回测硬门槛对齐：股价>2、流动性/活跃度(后30%成交额+后20%波动率拦截)、财务盈利。
         # 让模型只在可交易宇宙内学习排序，避免容量浪费在不可行动样本上。
         if os.environ.get('TRAIN_UNIVERSE_FILTER', '0') == '1':
-            logging.info("Step 3.5: 训练宇宙基础过滤 (price>2 / liquidity / profit_ok)...")
+            logging.info("Step 3.5: 训练宇宙基础过滤 (liquidity / profit_ok)...")
             n0 = len(global_data)
-            global_data = global_data[global_data['close'] > 2]
-            # 训练侧无现成 amount_ma20/atr_ratio，按回测同口径现算
+                        # 训练侧无现成 amount_ma20/atr_ratio，按回测同口径现算
             g = global_data.sort_values(['symbol', 'date'])
             grp = g.groupby('symbol', sort=False)
             amt20 = grp['amount'].transform(lambda s: s.rolling(20, min_periods=1).mean())
@@ -349,8 +348,8 @@ class AccumulationTrainer:
 
         for i, s in enumerate(symbols):
             try:
-                # 读取前复权数据，与回测保持一致
-                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="qfq", mode=2)
+                # 读取后复权数据，与回测保持一致
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="hfq", mode=2)
                 if df.empty or len(df) < 150: continue
                 df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)

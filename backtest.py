@@ -309,8 +309,8 @@ class AKShareChipDataSource(DataSource):
                 else:
                     df['is_profit_ok'], df['roe_up'], df['bp_ratio'] = False, 0.0, 1.0
 
-                # 过滤停牌与面值退市风险股
-                df = df[(df['is_suspended'] == False) & (df['close'] >= 1.0)].copy()
+                # 过滤停牌（价格规则已移除：hfq 口径下无低价精度问题）
+                df = df[(df['is_suspended'] == False)].copy()
                 df = df[df['date'] >= pd.to_datetime(start_date)].copy()
                 df = df.drop(columns=['is_suspended'])
                 

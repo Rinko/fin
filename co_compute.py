@@ -796,7 +796,7 @@ def sync_market_context_file(cache_dir, output_path='market_context_cache.parque
     # 1. 极简读取：只取计算广度必需的列 (qfq 对齐 backtest)
     for i, s in enumerate(all_symbols):
         try:
-            df = ldc.get_stock_data(s, '1990-01-01', '2100-01-01', adjust='qfq', mode=2)
+            df = ldc.get_stock_data(s, '1990-01-01', '2100-01-01', adjust='hfq', mode=2)
             if df is None or df.empty:
                 continue
             df['symbol'] = s
