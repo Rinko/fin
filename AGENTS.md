@@ -154,6 +154,10 @@ python run.py audit trades                        # 交易复盘
 10. **PyBroker Warmup**：`start_date = 交易期起点 − warmup 个交易日`（用 zzqz_df.xlsx 交易日历），区间 < warmup 日数则不产生交易
 11. **Live Signal**：只在 `run_backtest` 结束后从末个交易日输出，区间短/股票池小可能无输出
 12. **模型加载**：backtest.py **不再 import 期加载模型**（哨兵置空）；由入口显式调用 `backtest.reload_models()` + `load_magnitude_models()`；直跑 `main.py` 会被 RUN_LINE 哨兵拒绝，统一走 `run.py prod|backtest`
+13. **训练/推理复权口径契约**：所有模型训练脚本的 `adjust` 参数必须与推理管线一致（当前=`'qfq'`）。
+    使用 `adjust='none'` 训练的模型在 qfq 推理时会产生系统性特征值偏移——筹码分布特征对价格绝对水平
+    的处理在两种口径下不同，导致幅度模型的阈值判断完全失效（2026-08-24 hold-dd 实验实证：
+    触发率 92% vs 预期 6%）。新写训练脚本时必须显式检查此项。
 
 ## 缓存结构
 - `stock_data_cache/stock_data.db`：元数据 + 复权因子
