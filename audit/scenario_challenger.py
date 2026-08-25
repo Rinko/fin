@@ -260,28 +260,35 @@ def biz_invariant_checks(lab, breadth_df, zzqz_df):
     else:
         res['B1 拥挤尖峰->防御标签'] = (f"尖峰样本不足(n={int(spike.sum())})", 'WARN')
 
-    # --- B2 动量中性 (业务口径: 动量'强'单独不构成方向决断 -> 仅检验高端;
-    #     低动量端偏防御属常识, 只输出信息不判定) ---
+    # --- B2 动量充分性 (业务口径: 动量'强'单独不构成方向决断。
+    #     检验"充分性": 在无广度参与(up_ratio<0.5)的日子里, 高动量日的进攻判定
+    #     占比不应显著高于其他日子 —— 即动量在缺乏独立证据时不得额外放行进攻;
+    #     同时输出高动日场景分布供参考(现役树曾 76% 单边押注 opportunity)。---
     mom = zzqz_df['close'].pct_change(20).reindex(idx)
     mom_rank = mom.expanding(min_periods=250).rank(pct=True)
     top = (mom_rank >= 0.8).fillna(False)
+    upr_all = breadth_df['up_ratio'].reindex(idx)
+    nopart = (upr_all < 0.5).fillna(True)
     overall = lab['primary_scenario'].value_counts(normalize=True)
-    sub = lab.loc[top, 'primary_scenario']
-    if len(sub) >= 30:
-        d = sub.value_counts(normalize=True).reindex(overall.index).fillna(0)
-        n = len(sub)
-        z_risk = (d.get('risk', 0) - overall.get('risk', 0)) / np.sqrt(
-            max(overall.get('risk', 0) * (1 - overall.get('risk', 0)), 1e-9) / n)
-        z_opp = (d.get('opportunity', 0) - overall.get('opportunity', 0)) / np.sqrt(
-            max(overall.get('opportunity', 0) * (1 - overall.get('opportunity', 0)), 1e-9) / n)
-        tv = tv_distance(d.to_dict(), overall.to_dict())
-        ok = (abs(z_risk) < 1.645) and (abs(z_opp) < 1.645)
+    sub_top = lab.loc[top, 'primary_scenario']
+    info = ''
+    if len(sub_top) >= 30:
+        d = sub_top.value_counts(normalize=True).reindex(overall.index).fillna(0)
+        info = f"[参考] mom高五分位分布: opp={fmt_pct(d.get('opportunity', 0), 0)} risk={fmt_pct(d.get('risk', 0), 0)}"
+    cellA = top & nopart          # 高动量 & 无参与
+    cellB = (~top) & nopart       # 非高动量 & 无参与
+    opp = lab['primary_scenario'].eq('opportunity')
+    nA, nB = int(cellA.sum()), int(cellB.sum())
+    if nA >= 20 and nB >= 20:
+        pA, pB = opp[cellA].mean(), opp[cellB].mean()
+        p_pool = (opp[cellA].sum() + opp[cellB].sum()) / (nA + nB)
+        z = (pA - pB) / np.sqrt(max(p_pool * (1 - p_pool) * (1 / nA + 1 / nB), 1e-12))
         res['B2 动量强->不定方向'] = (
-            f"mom高五分位(n={n}): risk z={z_risk:+.1f} opp z={z_opp:+.1f} "
-            f"|risk]={fmt_pct(d.get('risk', 0), 0)} [opp]={fmt_pct(d.get('opportunity', 0), 0)}",
-            'PASS' if ok else 'FAIL')
+            f"P(进|高动&无参与)={fmt_pct(pA)}(n={nA}) vs P(进|其余&无参与)={fmt_pct(pB)}(n={nB}) "
+            f"z={z:+.1f} {info}",
+            'PASS' if z < 1.645 else 'FAIL')
     else:
-        res['B2 动量强->不定方向'] = (f"样本不足", 'WARN')
+        res['B2 动量强->不定方向'] = (f"样本不足(A={nA},B={nB}) {info}", 'WARN')
 
     # --- B3 踩踏广度 ---
     l20r = breadth_df['low20_ratio'].reindex(idx)
@@ -407,6 +414,51 @@ def explain_heads(X, y_bad, y_up, end_date, top_n=8):
           "      congestion↑=>p_bad↑), 使模型'不可违反业务常识'成为构造性保证而非事后检验。")
 
 
+def apply_business_gates(lab, preds, breadth_df, zzqz_df):
+    """纯模型 + 业务公理门控 (映射层安全底线, 预测核心不动):
+    G1 拥挤尖峰(cong>过去500日Q99) => 强制防御, 按 p_bad 相对分位选 risk/caution
+    G2 opportunity 需广度参与确认(up_ratio>=0.5) —— 动量不单独决断
+    G3 踩踏广度(low20_ratio>过去120日Q90) => 禁攻(bottom/opportunity -> caution)
+    返回 (gated_lab, 门控触发统计)。"""
+    idx = lab.index
+    out = lab.copy()
+    cong = breadth_df['congestion'].reindex(idx)
+    thr99 = breadth_df['congestion'].rolling(500, min_periods=250).quantile(0.99).shift(1).reindex(idx)
+    g1 = (cong > thr99).fillna(False)
+    l20r = breadth_df['low20_ratio'].reindex(idx)
+    q90 = breadth_df['low20_ratio'].rolling(120, min_periods=30).quantile(0.9).shift(1).reindex(idx)
+    g3 = (l20r > q90).fillna(False)
+    upr = breadth_df['up_ratio'].reindex(idx)
+    pb = preds['p_bad'].reindex(idx)
+    pb_q70 = pb.expanding(min_periods=PAST_Q_MIN).quantile(0.70).shift(1).reindex(idx)
+    above_ma = (zzqz_df['close'] >= zzqz_df['close_ma60']).reindex(idx).fillna(False)
+
+    hits = {'G1拥挤防御': 0, 'G2参与不足': 0, 'G3踩踏禁攻': 0}
+    for d in idx:
+        s = out.at[d, 'primary_scenario']
+        new, tags = s, []
+        if bool(g3.at[d]) and s in ('bottom', 'opportunity'):
+            new, _ = 'caution', tags.append('G3踩踏禁攻')
+        if bool(g1.at[d]):
+            want = 'risk' if (pd.notna(pb_q70.at[d]) and pb.at[d] >= pb_q70.at[d]) else 'caution'
+            if new != want:
+                new = want
+                tags.append('G1拥挤防御')
+        if new == 'opportunity' and not (pd.notna(upr.at[d]) and upr.at[d] >= 0.5):
+            new = 'normal' if bool(above_ma.at[d]) else 'caution'
+            tags.append('G2参与不足')
+        for t in tags:
+            hits[t] += 1
+        if new != s:
+            out.at[d, 'primary_scenario'] = new
+            out.at[d, 'position_multiplier'] = MULTIPLIER[new]
+            out.at[d, 'is_market_ok'] = new != 'risk'
+            base_reason = str(out.at[d, 'decision_reason']).replace('[shadow] ', '')
+            out.at[d, 'decision_reason'] = f"{base_reason}+{'/'.join(tags)}"
+    print(f"[gates] 门控触发: {hits}")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description='五象限场景标签挑战者对比')
     ap.add_argument('--start', default='2021-01-01')
@@ -440,14 +492,15 @@ def main():
     preds = walkforward_predict(X, y_bad, y_up, eval_dates)
     cha = map_scenarios(preds, zzqz_df)
     cha = cha[cha.index.isin(eval_dates)]
+    gate = apply_business_gates(cha.copy(), preds, breadth_df, zzqz_df)
 
     judge = is_market_ok.scenario_based_market_judgment
     print("[challenger] 现役基线打标中...")
     inc = label_days(eval_dates, zzqz_df, breadth_df, judge,
                      total_stocks=None, use_dynamic=True)
 
-    labels_map = {'现役决策树': inc, '自由LGBM': cha}
-    out_extra = {}
+    labels_map = {'现役决策树': inc, '自由LGBM': cha, '门控LGBM(参照)': gate}
+    out_extra = {'labels_challenger_gated.csv': gate}
 
     if args.hinge:
         Xh, mono_bad, mono_up = build_hinge_features(X)
