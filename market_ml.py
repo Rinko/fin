@@ -131,7 +131,7 @@ class AccumulationTrainer:
         for i, s in enumerate(symbols):
             try:
                 # 读取前复权数据，与回测保持一致
-                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="hfq", mode=2)
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="qfq", mode=2)
                 if df.empty or len(df) < 150: continue
                 df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)
@@ -350,7 +350,7 @@ class AccumulationTrainer:
         for i, s in enumerate(symbols):
             try:
                 # 读取前复权数据，与回测保持一致
-                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="hfq", mode=2)
+                df = ldc.get_stock_data(s, start_date, '2060-01-01', adjust="qfq", mode=2)
                 if df.empty or len(df) < 150: continue
                 df['date'] = pd.to_datetime(df['date'])
                 df['vwap'] = ((df['high'] + df['low'] + 2 * df['close']) / 4.0)
