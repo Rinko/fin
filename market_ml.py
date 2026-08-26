@@ -234,8 +234,21 @@ class AccumulationTrainer:
             lambda x: norm.ppf((x.rank(method='average') - 0.5) / (len(x) + 1e-9))
         )
         
+        # [exp] 基本面动量注入(env门控): 法定披露约定预计算, 截面百分位排名, NaN置中性0.5
+        _fund_cols = []
+        if os.environ.get('FUND_MOM_PARQUET'):
+            _fm = pd.read_parquet(os.environ['FUND_MOM_PARQUET'])
+            global_data = global_data.merge(_fm, on=['symbol', 'date'], how='left')
+            _fund_cols = [c for c in _fm.columns if c not in ('symbol', 'date')]
+            for c in _fund_cols:
+                global_data[c] = global_data.groupby('date')[c].rank(pct=True)
+                global_data[c] = global_data[c].fillna(0.5)
+            logging.info(f"  基本面动量特征注入: {_fund_cols}")
+
         # 7. 模型训练
         final_features = co_compute.FeatureConfig.get_model_input_features()
+        if _fund_cols:
+            final_features = final_features + _fund_cols
         logging.info(f"特征构建完毕。总特征数: {len(final_features)}")
 
         # 动态生成特征惩罚系数 (对齐对大盘特征的抑制)
