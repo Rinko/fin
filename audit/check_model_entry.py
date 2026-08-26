@@ -468,5 +468,9 @@ def run_capacity_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_DATA):
 
 
 if __name__ == "__main__":
-    run_comprehensive_audit()
-    run_capacity_audit()
+    import sys as _sys
+    _mp = os.environ.get('AUDIT_MODEL_PATH', ENTRY_MODEL_DEFAULT)
+    if not os.path.exists(_mp) and not os.path.islink(_mp):
+        print(f'[audit] 模型不存在: {_mp}'); _sys.exit(1)
+    run_comprehensive_audit(model_path=_mp)
+    run_capacity_audit(model_path=_mp)
