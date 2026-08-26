@@ -11,6 +11,8 @@ config.py — 全系统唯一参数源
 import os
 
 # ---- 生产现役模型（ALIGN 四件套）----
+# 训练窗口溯源: 入场/opport=2010起(20日视野族,前推有增益); 风控/riskmag=2012起(5日跌幅族,两次实证无增益)
+# ⚠️ 任一模型单独重训后必须重走"分布探针→校准常数对齐→Gate2"流程,阈值不可跨版本传递
 MODELS = {
     'ENTRY_MODEL_PKL':  'chip_accumulation_v6_g_pca1_z_hfq_t2010.pkl',
     'RISK_MODEL_PKL':   'chip_risk_model_v1_g_pca1_z_hfq.pkl',
