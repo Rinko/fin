@@ -225,4 +225,8 @@ def run_synergy_audit(buy_model_path=BUY_MODEL_DEFAULT, risk_model_path=RISK_MOD
 
 
 if __name__ == "__main__":
-    run_synergy_audit()
+    import sys as _sys
+    _mp = os.environ.get('AUDIT_MODEL_PATH', RISK_MODEL_DEFAULT if 'RISK_MODEL_DEFAULT' in dir() else 'chip_risk_model_v1_newfeat.pkl')
+    if not os.path.exists(_mp) and not os.path.islink(_mp):
+        print(f'[audit] 模型不存在: {_mp}'); _sys.exit(1)
+    run_synergy_audit(risk_model_path=_mp)
