@@ -711,6 +711,79 @@ zzqz_df['close_q30_w60'] = zzqz_df['close'].rolling(60, min_periods=15).quantile
 zzqz_df['volume_q15_w120'] = zzqz_df['volume'].rolling(120, min_periods=30).quantile(0.15)
 zzqz_df['close_max_w20'] = zzqz_df['close'].rolling(20, min_periods=5).max()  # 用于谨慎高位判定
 
+# 函数 1：【核心提取】统一计算量价背离与趋势信号（不含买卖执行，纯算法）
+# =========================================================================
+# [状态] 搁置中的实验方向 (2026-08 恢复归档): 原设计为第六级卖出规则
+# 'Major_Trend_Break_Or_Climax'(场景分支 x 风险分崩塌联合触发), 因 hfq 迁移与
+# 卖出栈重构被搁置。当前无调用点; 启用价值评估见 audit/gts_reuse_check.py。
+def get_trend_signals(ctx, scenario):
+    close = ctx.close[-1]
+    turnover = ctx.turnover
+    turnover_q90 = ctx.indicator('turnover_q90')[-1]
+    
+    bias_20 = ctx.bias_20[-1]
+    bias_20_q_high = ctx.indicator('bias_20_q_high')[-1]
+    # bias_20_q_over = ctx.indicator('bias_20_q_over')[-1]
+    
+    adx = ctx.adx[-1]
+    # adx_q_high = ctx.indicator('adx_q_high')[-1]
+    adx_q_over = ctx.indicator('adx_q_over')[-1]
+    # adx_q_low = ctx.indicator('adx_q_low')[-1]
+    # adx_q_pass = ctx.indicator('adx_q_pass')[-1]
+    
+    lookback = 30  # 适当拉长回溯期以捕捉明显的波峰波谷
+    bullish_divergence = False
+    bearish_divergence = False
+
+    if len(ctx.obv) >= lookback + 5:
+        # 1. 提取当前数据（使用均值平滑噪点）
+        curr_close = ctx.close[-1]
+        curr_obv = np.mean(ctx.obv[-3:])  # 最近3天OBV均值
+        
+        # 2. 确定参考区间（回溯期内，排除最近5天的干扰）
+        ref_close = ctx.close[-lookback:-5]
+        ref_obv = ctx.obv[-lookback:-5]
+        
+        # --- 牛背离逻辑：价格创新低，OBV不创新低 ---
+        # 找到参考期内的价格最低点及其对应的 OBV
+        idx_price_min = np.argmin(ref_close)
+        price_low_ref = ref_close[idx_price_min]
+        obv_at_price_low = ref_obv[idx_price_min]
+        
+        # 判断：当前价格低于前低，但当前OBV高于前低时的OBV
+        bullish_divergence = (curr_close < price_low_ref) and (curr_obv > obv_at_price_low)
+        
+        # --- 熊背离逻辑：价格创新高，OBV不创新高 ---
+        # 找到参考期内的价格最高点及其对应的 OBV
+        idx_price_max = np.argmax(ref_close)
+        price_high_ref = ref_close[idx_price_max]
+        obv_at_price_high = ref_obv[idx_price_max]
+        
+        # 判断：当前价格高于前高，但当前OBV低于前高时的OBV
+        bearish_divergence = (curr_close > price_high_ref) and (curr_obv < obv_at_price_high)
+
+    # 信号默认状态初始化
+    # sell_signal_confirmed = True
+    # # buy_signal_confirmed = adx < adx_q_over and bias_20 < bias_20_q_over and not bearish_divergence
+    # buy_signal_confirmed = True
+    
+    # # 结合市场四大场景（底/机/警/他）微调买卖信号
+    if 'bottom' in scenario:
+        # buy_signal_confirmed = True
+        tend_broke = (turnover[-1] > turnover_q90) and bearish_divergence and (bias_20 > bias_20_q_high)
+    elif 'opportunity' in scenario:
+        # buy_signal_confirmed = buy_signal_confirmed and adx > adx_q_pass
+        tend_broke = bearish_divergence
+    elif 'caution' in scenario:
+        # buy_signal_confirmed = buy_signal_confirmed and adx > adx_q_high and bullish_divergence
+        tend_broke = tend_broke = (turnover[-1] > turnover_q90) and bearish_divergence and (bias_20 > bias_20_q_high)
+    else:
+        # buy_signal_confirmed = buy_signal_confirmed and adx > adx_q_high
+        tend_broke = bearish_divergence
+
+    return bullish_divergence, tend_broke
+
+
 _daily_market_cache = {}
 
 BUY_ELIGIBILITY_DETAILS = []
