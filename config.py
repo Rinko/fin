@@ -30,6 +30,10 @@ DEFAULTS = {
     'OPPORT_HURDLE':       '0.02',
     # 风控退出
     'RISK_MAG_SELL_THRESHOLD': '-0.05',
+    # 熔断持续性持仓上限 (V5 双窗仲裁通过 2026-08-26): 仅作用于 Market_Risk_Clearance
+    # 豁免区(ml_rank<=0.05)的亏损持仓, 连续 risk>=N 日时防守退出 —— 与模型分零交叉
+    'RISK_HOLD_CAP':   '1',
+    'RISK_HOLD_CAP_N': '3',
     # ml_rank floor（默认全关）
     'ML_RANK_FLOOR_BOTTOM': '0.0', 'ML_RANK_FLOOR_OPPORTUNITY': '0.0',
     'ML_RANK_FLOOR_NORMAL': '0.0', 'ML_RANK_FLOOR_CAUTION': '0.0',
