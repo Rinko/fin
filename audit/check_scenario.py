@@ -26,6 +26,9 @@
 #   python run.py audit scenario --start 2019-01-01 --ew
 #   python run.py audit scenario --tornado          # 参数敏感性
 #   python run.py audit scenario --fixed            # 固定阈值版对照
+#
+# HOLDOUT 纪律: 2025-09-01 起的区间为终审专用, 迭代期评估一律 --end 2025-08-31;
+# 终审只许对最终幸存者各执行一次。
 import os
 import re
 import sys

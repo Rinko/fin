@@ -15,6 +15,9 @@
 # 用法:
 #   python run.py audit challenger                 # 默认 2021-01-01 至今
 #   python run.py audit challenger --start 2019-01-01
+#
+# HOLDOUT 纪律: 2025-09-01 起的区间为终审专用, 迭代期评估一律 --end 2025-08-31;
+# 终审只许对最终幸存者各执行一次。
 import os
 import sys
 import argparse
@@ -71,9 +74,11 @@ def build_features(breadth_df, zzqz_df):
     return X.replace([np.inf, -np.inf], np.nan)
 
 
-def walkforward_predict(X, y_bad, y_up, eval_dates, mono=None):
+def walkforward_predict(X, y_bad, y_up, eval_dates, mono=None, min_train=None):
     """季度走前预测 p_bad / p_up (仅用 <t-EMBARGO 信息训练)。
-    mono: {'p_bad': 约束列表|None, 'p_up': ...} 与 X 列对齐的单调约束。"""
+    mono: {'p_bad': 约束列表|None, 'p_up': ...} 与 X 列对齐的单调约束。
+    min_train: 覆盖默认 MIN_TRAIN (早期周期前移验证时历史不足, 需受控放宽并声明)。"""
+    mt = int(min_train) if min_train else MIN_TRAIN
     cal = X.index
     pos = {d: i for i, d in enumerate(cal)}
     preds = pd.DataFrame(index=cal, columns=['p_bad', 'p_up'], dtype=float)
@@ -87,13 +92,13 @@ def walkforward_predict(X, y_bad, y_up, eval_dates, mono=None):
         test_dates = groups[key]
         t0 = test_dates[0]
         end_pos = pos[t0] - EMBARGO
-        if end_pos < MIN_TRAIN:
+        if end_pos < mt:
             continue
         train_idx = slice(0, end_pos + 1)
         Xtr = X.iloc[train_idx]
         ok = Xtr.notna().all(axis=1) & y_bad.notna().reindex(Xtr.index, fill_value=False)
         Xtr = Xtr[ok]
-        if len(Xtr) < MIN_TRAIN:
+        if len(Xtr) < mt:
             continue
         for col, y in (('p_bad', y_bad), ('p_up', y_up)):
             ytr = y.reindex(Xtr.index).dropna().astype(int)
@@ -548,6 +553,9 @@ def main():
                     help='B3 条件尾部验证 (被拦进攻日的尾部风险 vs 放行组)')
     ap.add_argument('--no-g3', action='store_true',
                     help='禁用 G3 踩踏禁攻门 (消融用; 默认启用, 组合级证据支持)')
+    ap.add_argument('--min-train', type=int, default=None,
+                    help='覆盖最少训练样本数 (周期前移验证时历史不足, 需声明)')
+    ap.add_argument('--tag', default='', help='输出文件名后缀 (分区间落盘用)')
     ap.add_argument('--out', default=os.path.join('external_data', 'scenario_audit'))
     args = ap.parse_args()
 
@@ -571,7 +579,7 @@ def main():
     if len(eval_dates) < 100:
         raise SystemExit(f"[challenger] 有效评估日不足: {len(eval_dates)}")
 
-    preds = walkforward_predict(X, y_bad, y_up, eval_dates)
+    preds = walkforward_predict(X, y_bad, y_up, eval_dates, min_train=args.min_train)
     cha = map_scenarios(preds, zzqz_df)
     cha = cha[cha.index.isin(eval_dates)]
     gate = apply_business_gates(cha.copy(), preds, breadth_df, zzqz_df,
@@ -583,7 +591,7 @@ def main():
                      total_stocks=None, use_dynamic=True)
 
     labels_map = {'现役决策树': inc, '自由LGBM': cha, '门控LGBM(参照)': gate}
-    out_extra = {'labels_challenger_gated.csv': gate}
+    out_extra = {f'labels_challenger_gated{args.tag}.csv': gate}
 
     if args.g3check:
         from audit.check_scenario import build_ew_return_series
@@ -595,11 +603,12 @@ def main():
         Xh, mono_bad, mono_up = build_hinge_features(X)
         print("[challenger] 铰链约束变体走前拟合中...")
         preds_h = walkforward_predict(Xh, y_bad, y_up, eval_dates,
-                                      mono={'p_bad': mono_bad, 'p_up': mono_up})
+                                      mono={'p_bad': mono_bad, 'p_up': mono_up},
+                                      min_train=args.min_train)
         chh = map_scenarios(preds_h, zzqz_df)
         chh = chh[chh.index.isin(eval_dates)]
         labels_map['铰链约束LGBM'] = chh
-        out_extra['labels_challenger_hinge.csv'] = chh
+        out_extra[f'labels_challenger_hinge{args.tag}.csv'] = chh
 
     compare(labels_map)
 
@@ -608,7 +617,7 @@ def main():
     print_biz_checks(checks_map)
 
     os.makedirs(args.out, exist_ok=True)
-    p = os.path.join(args.out, 'labels_challenger.csv')
+    p = os.path.join(args.out, f'labels_challenger{args.tag}.csv')
     cha.to_csv(p, encoding='utf-8-sig')
     print(f"\n[challenger] 挑战者标签已保存: {p}")
     for fname, lab_df in out_extra.items():
