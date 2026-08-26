@@ -791,6 +791,7 @@ BUY_ELIGIBILITY_DETAILS = []
 
 _SHADOW_LABELS = None
 _SHADOW_MISS_WARNED = False
+_RISK_RUN_DAYS = 0   # 连续 risk 场景交易日计数 (熔断持续性, 供 RISK_HOLD_CAP 试点规则)
 
 
 def _load_shadow_labels():
@@ -861,6 +862,12 @@ def before_exec_fn(ctx_map):
         label_source = 'shadow' if shadow_row is not None else 'live'
         mkt_status = shadow_row or is_market_ok.scenario_based_market_judgment(
             current_dt, zzqz_df, GLOBAL_MARKET_STATS, len(ctx_map))
+
+        global _RISK_RUN_DAYS
+        if mkt_status['primary_scenario'] == 'risk':
+            _RISK_RUN_DAYS += 1
+        else:
+            _RISK_RUN_DAYS = 0
         
         current_dt_ts = pd.Timestamp(current_dt).normalize() 
         # 使用 Timestamp 对象直1从字典取值
@@ -885,7 +892,8 @@ def before_exec_fn(ctx_map):
             'decision_reason': mkt_status['decision_reason'],
             'day_limit': day_limit,
             'daily_ml_threshold': daily_ml_threshold,
-            'label_source': label_source
+            'label_source': label_source,
+            'risk_run_days': _RISK_RUN_DAYS
         }
         
     daily_env = _daily_market_cache[current_dt]

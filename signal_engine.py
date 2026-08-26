@@ -321,4 +321,15 @@ def evaluate_sell_signal(ctx, daily_env, position,
             should_sell = True
             sell_reason = "Market_Risk_Clearance"
 
+    # --- 6. 熔断持续性持仓上限 (试点, env 门控默认关) ---
+    # 与模型零交叉设计: 仅作用于 Market_Risk_Clearance 的豁免区 (ml_rank<=0.05,
+    # 即模型仍看好的持仓) —— 模型分本身不参与触发, 触发依据是熔断的"持续性"
+    # (连续 risk_run_days >= N) 与亏损状态, 补足模型对系统性状态持续度的盲区。
+    if (not should_sell and os.environ.get('RISK_HOLD_CAP') == '1'
+            and daily_env['primary_scenario'] == 'risk'):
+        cap_n = int(os.environ.get('RISK_HOLD_CAP_N', '3'))
+        if int(daily_env.get('risk_run_days', 0)) >= cap_n and ml_rank <= 0.05 and curr_pnl < 0:
+            should_sell = True
+            sell_reason = "Risk_Regime_Hold_Cap"
+
     return should_sell, sell_reason
