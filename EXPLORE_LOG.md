@@ -94,4 +94,9 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
 - `BUY_QUOTA_OVERRIDE=5`（每场景 5 只）；
 - floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
 - 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
-
+- **2026-08-26 入场模型升级：基本面动量件**（exp/resid-mom-proto 分支并入 main）:
+  - 新增盈利加速度 + 毛利率变化两个基本面特征，法定披露日 PIT 对齐，仅注入入场排名模型
+  - 训练窗口维持 2010 起点；风控/opport/riskmag 三件不变
+  - Gate1: OOS RankIC 0.1046→0.1055, IC_IR +2.8%, 胜率 +0.63pp, 无单年显著退化
+  - Gate2 全链回测: 105.88%→116.15%, Sharpe 1.285→1.450, Calmar 0.901→1.035, maxDD -14.69%→-13.64%
+  - 生产 pkl: `chip_accumulation_v6_g_pca1_z_true2010_fund.pkl` 入 config; 同步 newfeat 符号链接
