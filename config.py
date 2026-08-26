@@ -11,11 +11,13 @@ config.py — 全系统唯一参数源
 import os
 
 # ---- 生产现役模型（ALIGN 四件套）----
+# 训练窗口: 四件套统一 2010 起（2026-08-26 统一化; 风控族单测无增益但无害,统一以简化维护）
+# ⚠️ 任一模型单独重训后必须重走"分布探针→校准常数对齐→Gate2"流程,阈值不可跨版本传递
 MODELS = {
-    'ENTRY_MODEL_PKL':  'chip_accumulation_v6_g_pca1_z.pkl',
-    'RISK_MODEL_PKL':   'chip_risk_model_v1_g_pca1_z.pkl',
-    'OPPORT_PKL':       'chip_opport_magnitude_excess_for_g.pkl',
-    'RISKMAG_PKL':      'chip_risk_magnitude_for_g.pkl',
+    'ENTRY_MODEL_PKL':  'chip_accumulation_v6_g_pca1_z_true2010_fund.pkl',
+    'RISK_MODEL_PKL':   'chip_risk_model_v1_g_pca1_z_hfq_t2010.pkl',
+    'OPPORT_PKL':       'chip_opport_magnitude_excess_for_g_hfq_t2010.pkl',
+    'RISKMAG_PKL':      'chip_risk_magnitude_for_g_hfq_t2010.pkl',
 }
 
 # ---- 全量受管键与生产默认值 ----
@@ -25,22 +27,19 @@ DEFAULTS = {
     'POS_MULT_WEIGHT':  '0.5',
     'POS_MULT_BIAS':    '0.5',
     'OPPORT_SIZING_COEFF': '0.30',
-    'OPPORT_SIZING_MIN':   '0.5',   # 生产锚点口径(main直跑引擎默认)
-    'OPPORT_SIZING_MAX':   '1.5',
+    'OPPORT_SIZING_MIN':   '0.4',   # 历史生产裁剪带(全部锚点基线口径)
+    'OPPORT_SIZING_MAX':   '1.8',
     'OPPORT_HURDLE':       '0.02',
     # 风控退出
-    'RISK_MAG_SELL_THRESHOLD': '-0.05',
-    # 熔断持续性持仓上限 (V5 双窗仲裁通过 2026-08-26): 仅作用于 Market_Risk_Clearance
-    # 豁免区(ml_rank<=0.05)的亏损持仓, 连续 risk>=N 日时防守退出 —— 与模型分零交叉
-    'RISK_HOLD_CAP':   '1',
-    'RISK_HOLD_CAP_N': '3',
+    'RISK_MAG_SELL_THRESHOLD': '-0.055',  # hfq④校准: 对齐旧模型7.3%触发率
+    'OPPORT_PRED_OFFSET': '-0.0063',      # hfq③校准: 中位对齐旧超额语义
     # ml_rank floor（默认全关）
     'ML_RANK_FLOOR_BOTTOM': '0.0', 'ML_RANK_FLOOR_OPPORTUNITY': '0.0',
     'ML_RANK_FLOOR_NORMAL': '0.0', 'ML_RANK_FLOOR_CAUTION': '0.0',
     'ML_RANK_FLOOR_RISK': '0.0',
     # 场景化 quota
     'BUY_QUOTA_BOTTOM': '5', 'BUY_QUOTA_OPPORTUNITY': '5', 'BUY_QUOTA_NORMAL': '2',
-    'BUY_QUOTA_CAUTION': '1', 'BUY_QUOTA_RISK': '0',
+    'BUY_QUOTA_CAUTION': '3', 'BUY_QUOTA_RISK': '0',
     # 业务开关
     'MODERATE_BUSINESS_RULES': '0',
     'USE_PROFIT_RATIO_CON': '0',
