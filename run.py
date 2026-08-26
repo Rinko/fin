@@ -20,7 +20,7 @@ LINES = ('prod', 'backtest', 'signals', 'bench', 'audit')
 
 def _dispatch_audit(rest):
     mapping = {
-        'trades':       'check_trades.py',
+        'trades':       'audit/check_trades.py',
         'entry':        'audit/check_model_entry.py',
         'risk':         'audit/check_model_risk.py',
         'magnitude':    'audit/check_magnitude_model.py',
@@ -106,6 +106,12 @@ def main():
         buys.insert(0,'action','BUY')
         tag=_pd.Timestamp(last).strftime('%Y%m%d')
         os.makedirs(outdir,exist_ok=True)
+        try:
+            from price_display import convert_close_column
+            buys=convert_close_column(buys)
+            print('[daily] close 列已换算为前复权展示价')
+        except Exception as _e:
+            print(f'[daily] 价格转换失败,保留内部口径: {_e}')
         buys[['action','date','symbol','close','ml_rank','primary_scenario']].to_csv(
             f'{outdir}/{tag}_buy_signals.csv',index=False)
         print(f"[daily] 买入 {len(buys)} 只 -> {tag}_buy_signals.csv")

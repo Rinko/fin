@@ -478,9 +478,8 @@ class AccumulationTrainer:
 
 if __name__ == "__main__":
     trainer = AccumulationTrainer()
-    _sd = os.environ.get('TRAIN_START_DATE', '2012-03-12')
     trainer.run_global_training(
-        start_date=_sd,
+        start_date=os.environ.get('TRAIN_START_DATE','2012-03-12'),
         warmup_days=400,
         train_end_date='2019-12-31',
         val_end_date='2020-12-31',
@@ -489,9 +488,8 @@ if __name__ == "__main__":
     )
     # 风控模型重训会覆盖生产 chip_risk_model_v1.pkl（经软链接），仅在显式要求时执行
     if os.environ.get('TRAIN_SELL', '0') == '1':
-        _sd2 = os.environ.get('TRAIN_START_DATE', '2012-03-12')
         trainer.run_global_sell_training(
-            start_date=_sd2,
+            start_date=os.environ.get('TRAIN_START_DATE','2012-03-12'),
             warmup_days=400,
             train_end_date='2019-12-31',
             val_end_date='2020-12-31',

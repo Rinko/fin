@@ -457,9 +457,10 @@ class AKShareChipDataSource(DataSource):
 
         # 3.5) 可选：幅度模型推理
         if trained_opport_mag_lgbm is not None:
+            _opp_off = float(os.environ.get('OPPORT_PRED_OFFSET', '0') or 0)
             final_df_smooth['opport_mag'] = trained_opport_mag_lgbm.predict(
                 final_df_smooth[opport_mag_features]
-            )
+            ) + _opp_off
         if trained_risk_mag_lgbm is not None:
             final_df_smooth['risk_mag'] = trained_risk_mag_lgbm.predict(
                 final_df_raw[risk_mag_features]
@@ -795,10 +796,11 @@ _RISK_RUN_DAYS = 0   # 连续 risk 场景交易日计数 (熔断持续性, 供 R
 
 
 def _load_shadow_labels():
-    """影子场景标签源 (实验通道)。
+    """影子场景标签源 (challenger 实验通道)。
 
     设置环境变量 SCENARIO_LABELS_CSV 后, before_exec_fn 的每日大盘场景改从该
-    CSV 读取, 用于感知层变体与现役的同口径组合对比; 未设置时零影响。
+    CSV 读取 (audit/scenario_challenger.py 落盘的 labels_challenger.csv),
+    用于与现役 is_market_ok 决策树做同口径组合回测对比; 未设置时零影响。
     """
     global _SHADOW_LABELS
     path = os.environ.get('SCENARIO_LABELS_CSV')
@@ -845,7 +847,7 @@ def before_exec_fn(ctx_map):
     # 1. 每天仅计算一次大盘环境并统一存入缓存
     if current_dt not in _daily_market_cache:
         money_sig = calculate_money_supply_signal(money_df, current_dt)
-        
+
         # 提取过去 500 个交易日的拥挤度数据
         recent_congestion = available_market['congestion'].tail(500)
         current_congestion = current_market['congestion']

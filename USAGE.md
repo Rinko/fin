@@ -15,7 +15,7 @@
 | 入场排名 | 选谁进候选池 | 预测未来 20 日相对强弱排名 |
 | 风控排名 | 持仓预警 | 预测短期危险度，恶化即退出 |
 | 机会幅度 | 买多重 | 预测超额收益幅度，正超门槛加仓 |
-| 风险幅度 | 何时必须跑 | 预测最差单日跌幅，破 -5% 清仓 |
+| 风险幅度 | 何时必须跑 | 预测最差单日跌幅，破 -5.5% 清仓 |
 
 ## 二、命令速查（唯一入口 run.py）
 
@@ -25,7 +25,7 @@ python run.py prod --no-data        # ② 重路径生产校验（PyBroker 全�
 python run.py backtest              # ② 组合回测（区间至 BASELINE_END）
 python run.py signals               # ③ 导出全量候选 CSV（研究用）
 python run.py bench                 # ④ 极简排名基准（模型比较专用）
-python run.py audit entry|risk|magnitude|trades|signal_level   # ⑤ 审计
+python run.py audit entry|risk|magnitude|trades|signal_level   # ⑤ 审计（定向目录: AUDIT_TRADES_PATH=results/xxx）
 python run.py audit exits --holdings 持仓.csv --start 2026-01-01      # ⑥ 持仓离场信号
 ```
 
@@ -51,8 +51,8 @@ python get_base_data.py --task daily --date DATE   # 补某天
   不足会因 EMA 路径依赖导致同日分数漂移甚至头部翻转；过短直接**零信号** |
 | `simple_rank_benchmark`（经 bench） | 无规则纯排名对照 | 用于模型横向比较，成绩不代表策略收益 |
 | `get_base_data.py` | BaoStock 数据同步 |
-| `run.py daily` | 轻量每日信号：全市场打分→场景配额选买→持仓注入卖出规则链 | 五条卖出规则全量生效（含 Risk_Mag_Exit）；大盘场景默认 normal，可用 --scenario 覆盖 |
-| `run.py audit exits` | 输入持仓 CSV(symbol,entry_date,entry_price[,shares]) 输出今日离场建议 | 大盘清仓类退出默认按 normal 场景，可用 --scenario 覆盖；Risk_Mag_Exit 当前降级跳过 | 更新后务必走「六、数据更新三查」 |
+| `run.py daily` | 轻量每日信号：全市场打分→场景配额选买→持仓注入卖出规则链 | 五条卖出规则全量生效（含 Risk_Mag_Exit）；买入名单 close 列已自动换算为 qfq 展示价；大盘场景默认 normal，可用 --scenario 覆盖 |
+| `run.py audit exits` | 输入持仓 CSV(symbol,entry_date,entry_price[,shares]) 输出今日离场建议 | 大盘清仓类退出默认按 normal 场景，可用 --scenario 覆盖；Risk_Mag_Exit 全量生效 | 更新后务必走「六、数据更新三查」 |
 | `config.py` | 所有参数唯一定义处 | 修改默认值在这里；业务线差异看 PROFILES |
 
 ## 五、常见问题（FAQ）
@@ -72,10 +72,11 @@ python get_base_data.py --task daily --date DATE   # 补某天
 
 ## 六、现役版本与成绩（截至 2026-08-21 同口径）
 
-- 版本：ALIGN 四件套（2026-08-23 切换）
-- 规则：quota risk=0 / normal=2 / caution=3 / bottom=opp=5；floor 关；仓位基准 4%
-- 成绩 vs 旧版：**127.6% vs 111.6%｜Sharpe 1.41 vs 1.27｜Calmar 0.99 vs 0.94**
-- 旧版回滚：见 Q4
+- 版本：**hfq 四件套·t2010 双件**（2026-08-25 切换；08-26 入场+机会幅度升级为 2010 起点版；内部全链路统一后复权，展示层 qfq）
+- 规则：同前（quota/floor/仓位基准不变）；绝对价格规则已废除；校准常数 RISK_MAG_SELL_THRESHOLD=-0.055、OPPORT_PRED_OFFSET=-0.0063、裁剪带 [0.4,1.8] 已固化
+- 同环境对照（2026-08-25 口径）：qfq 对照 **108.6%/Sharpe 1.318** vs hfq 现役 **95.6%/1.199/DD -13.78%（更浅）**
+- ⚠️ 旧锚点 127.6% 因 8·23 数据全量重同步致环境漂移已不可复现，仅存档参考
+- 回滚：模型见 Q4；口径整体回切 `INFERENCE_ADJUST=qfq` + 根目录旧四件套 pkl
 
 ## 七、数据更新后的三步必查
 

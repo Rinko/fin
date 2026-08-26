@@ -225,8 +225,19 @@ def run_synergy_audit(buy_model_path=BUY_MODEL_DEFAULT, risk_model_path=RISK_MOD
 
 
 if __name__ == "__main__":
-    import sys as _sys
-    _mp = os.environ.get('AUDIT_MODEL_PATH', RISK_MODEL_DEFAULT if 'RISK_MODEL_DEFAULT' in dir() else 'chip_risk_model_v1_newfeat.pkl')
-    if not os.path.exists(_mp) and not os.path.islink(_mp):
-        print(f'[audit] 模型不存在: {_mp}'); _sys.exit(1)
-    run_synergy_audit(risk_model_path=_mp)
+    _mp = os.environ.get('AUDIT_MODEL_PATH') or None
+    if _mp and os.path.exists(_mp):
+        _dp = os.environ.get('AUDIT_DATA_PATH') or (
+            os.path.splitext(_mp)[0]+'_data.csv'
+            if os.path.exists(os.path.splitext(_mp)[0]+'_data.csv') else FALLBACK_DATA)
+    else:
+        _mp, _dp = None, None
+    if _mp is None:
+        _kw = {}
+    else:
+        _rdp = os.environ.get('AUDIT_DATA_PATH') or (
+            os.path.splitext(_mp)[0]+'_data.csv'
+            if os.path.exists(os.path.splitext(_mp)[0]+'_data.csv') else None)
+        _kw = dict(risk_model_path=_mp)
+        if _rdp: _kw['risk_data_path'] = _rdp
+    run_synergy_audit(**_kw)

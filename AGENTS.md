@@ -32,7 +32,7 @@ python run.py prod --no-data              # 重路径生产校验（PyBroker 全
 python run.py backtest                    # 组合回测（至 BASELINE_END）
 python run.py signals                     # 全量候选导出
 python run.py bench                       # 极简排名基准
-python run.py audit entry|risk|magnitude|trades|exits|signal_level
+python run.py audit entry|risk|magnitude|trades|exits|signal_level|scenario|challenger
 python get_base_data.py --task all        # 全部数据同步
 ```
 
@@ -65,7 +65,7 @@ python get_base_data.py --task all        # 全部数据同步
 10. **PyBroker Warmup**：start = 交易期起点 − warmup 个交易日；区间 < warmup 则无交易
 11. **Live Signal**：仅 run_backtest 结束后末日输出
 12. **模型加载**：backtest.py 不做 import 期加载（哨兵置空）；由入口显式 reload_models() + load_magnitude_models()；直跑 main.py 被 RUN_LINE 哨兵拒绝
-13. **复权口径**：默认前复权(qfq)。所有训练脚本的 adjust 参数必须为 'qfq'，与推理管线一致
+13. **复权口径**：内部全链路统一后复权(hfq)（训练=推理，env 门控 INFERENCE_ADJUST 可回切）；用户展示层价格经 price_display 换算为 qfq；绝对价格规则已废除（hfq 无低价精度问题）
 
 ## 关键文件
 

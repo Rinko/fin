@@ -100,3 +100,19 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
   - Gate1: OOS RankIC 0.1046→0.1055, IC_IR +2.8%, 胜率 +0.63pp, 无单年显著退化
   - Gate2 全链回测: 105.88%→116.15%, Sharpe 1.285→1.450, Calmar 0.901→1.035, maxDD -14.69%→-13.64%
   - 生产 pkl: `chip_accumulation_v6_g_pca1_z_true2010_fund.pkl` 入 config; 同步 newfeat 符号链接
+
+- **2026-08-25 hfq 口径迁移定版**（内部全链路后复权，展示层 price_display 换算 qfq）:
+  - 动因：废除 qfq 低价精度补丁规则（close>2/≥1.0 三处）；模型层实测新旧 ρ≥0.997、Top5 重合 90%——复权对筹码特征影响为噪声级
+  - 事故与修复：现行幅度训练脚本 target 定义漂移（riskmag 被共享函数改为 σ 标准化、opport 丢失超额语义）→ 训练器本地恢复生产语义（raw 未来5日最差单日% / 个股-市场超额）并重训；**阈值不可跨模型传递第三例实证**（-0.05 触发率 7.3%→100%）
+  - 校准常数固化：RISK_MAG_SELL_THRESHOLD=-0.055（对齐旧触发率）、OPPORT_PRED_OFFSET=-0.0063（中位对齐）、裁剪带 [0.4,1.8]
+  - ⚠️ **8·22 锚点不可复现实锤**：同模型同口径当日重跑仅 108.6%（vs 127.6%）——8·23 全量数据重同步改写 market_context_cache 等环境所致，~19pp 列低优先级悬案；hfq 净效应 -13pp 且 DD 更浅
+  - 同环境基线：qfq 对照 108.6%/1.318 vs hfq 现役 95.6%/1.199/DD-13.78%；回退开关 INFERENCE_ADJUST=qfq
+  - 幅度训练入口变更为 `external_data/explore_night/magnitude_20260817/scripts/train_magnitude_for_g.py`（target 语义已在脚本内本地固化，不再依赖共享函数）；原 train_magnitude_align.py 未随迁移验证
+- **2026-08-26 训练起点前推试点采纳**（TRAIN_START 2012-03-12 → 2010-01-01，入场模型）:
+  - 动因：hfq 迁移后低价精度约束消失；数据体检显示缓存含 321 只退市股(5.8%)、2010 年前数据 1364 只——幸存者偏差可控
+  - Gate1 真实对比（审计接线修复后）：Top1% 2.12% vs 2.00%、OOS IC_IR +11%、胜率 +3.1pp、年度仅 2025 微降 → 全指标胜出采纳 `chip_accumulation_v6_g_pca1_z_hfq_t2010.pkl`
+  - ⚠️ 验证链事故修复：entry/risk 审计器 __main__ 硬编码符号链接旧模型+固定 model_data.csv，此前所有"入场/风控审计"实际审的是旧 qfq 模型；现支持 AUDIT_MODEL_PATH env + 自动配对同名 _data.csv 副档
+  - 待办：风控排名模型同法前推试点未做；market_ml 已支持 TRAIN_START_DATE env
+- **2026-08-26 训练起点前推·风控/幅度线关闭**: 风控 t2010 试点 OOS RankIC -0.4705 vs 现役 -0.4724 打平无增益 → 不采纳；幅度模型跟随前推一并关闭（同属短视野任务+阈值重标定链成本高）。结论：**起点前推增益仅存在于排序类长视野任务**
+- **2026-08-26 前推试点·opport 翻案采纳**: 用户质询推翻"短视野类比关闭"——opport 目标为20日超额收益与入场同视野族。Gate2 双指标通过（Sharpe 1.209/Calmar 0.924 vs 基线 1.199/0.901），分布与现役几乎重合故沿用偏移-0.0063 → `chip_opport_magnitude_excess_for_g_hfq_t2010.pkl` 入 config。修正后工作假设（非定论）：起点前推增益可能存在于20日视野族（入场+opport 各一正例）；5日跌幅族中风控排名一例零增益，riskmag 未实测系类比关闭——待补测
+- **2026-08-26 四件套窗口统一化采纳**: riskmag 补测完成（分布与现役几乎重合，P(<-0.055)≈7%，阈值-0.055 直接沿用——"5日跌幅族"假设补齐实证）；统一四件套 Gate2 双指标互有胜负（Sharpe↑/Calmar↓，收益+11.5pp），按维护性裁决采纳全 t2010。工作假设更新：前推对四件均无害；增益仅在20日视野族可复现
