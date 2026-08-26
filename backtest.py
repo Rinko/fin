@@ -1006,9 +1006,13 @@ def chip_strategy(ctx):
 
     # -------------------------------------------------------------------------
     elif position:
+        trend_broke_flag = None
+        if os.environ.get('TREND_BREAK_EXIT') == '1':
+            _, trend_broke_flag = get_trend_signals(ctx, daily_env['primary_scenario'])
         should_sell, sell_reason = signal_engine.evaluate_sell_signal(
             ctx, daily_env, position,
             trained_risk_mag_lgbm=trained_risk_mag_lgbm,
+            tend_broke=trend_broke_flag,
         )
 
         if should_sell:

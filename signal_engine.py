@@ -224,7 +224,7 @@ def compute_target_size(ctx, daily_env,
 # 卖出判断
 # =========================================================================
 def evaluate_sell_signal(ctx, daily_env, position,
-                         trained_risk_mag_lgbm=None):
+                         trained_risk_mag_lgbm=None, tend_broke=None):
     """
     判断持仓是否应该卖出。
 
@@ -331,5 +331,13 @@ def evaluate_sell_signal(ctx, daily_env, position,
         if int(daily_env.get('risk_run_days', 0)) >= cap_n and ml_rank <= 0.05 and curr_pnl < 0:
             should_sell = True
             sell_reason = "Risk_Regime_Hold_Cap"
+
+    # --- 7. 大趋势破坏防守 (原第六级恢复版, env 门控默认关) ---
+    # tend_broke: 场景分支调制的个股量价趋势破坏 (熊背离/放量/乖离, 原始技术面,
+    # 非模型分 -> 与模型零交叉); 仅对亏损持仓生效, 保持防守属性。
+    if (not should_sell and os.environ.get('TREND_BREAK_EXIT') == '1'
+            and tend_broke and curr_pnl < 0):
+        should_sell = True
+        sell_reason = "Major_Trend_Break"
 
     return should_sell, sell_reason
