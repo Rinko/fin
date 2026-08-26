@@ -95,3 +95,10 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
 - floor 规则保留但**默认关闭**（0.0），需显式设置 `ML_RANK_FLOOR_OPPORTUNITY/CAUTION=0.005` 启用；
 - 依据：业务逻辑支撑不足，待分年 walk-forward 验证后再定去留。
 
+- **2026-08-25 hfq 口径迁移定版**（内部全链路后复权，展示层 price_display 换算 qfq）:
+  - 动因：废除 qfq 低价精度补丁规则（close>2/≥1.0 三处）；模型层实测新旧 ρ≥0.997、Top5 重合 90%——复权对筹码特征影响为噪声级
+  - 事故与修复：现行幅度训练脚本 target 定义漂移（riskmag 被共享函数改为 σ 标准化、opport 丢失超额语义）→ 训练器本地恢复生产语义（raw 未来5日最差单日% / 个股-市场超额）并重训；**阈值不可跨模型传递第三例实证**（-0.05 触发率 7.3%→100%）
+  - 校准常数固化：RISK_MAG_SELL_THRESHOLD=-0.055（对齐旧触发率）、OPPORT_PRED_OFFSET=-0.0063（中位对齐）、裁剪带 [0.4,1.8]
+  - ⚠️ **8·22 锚点不可复现实锤**：同模型同口径当日重跑仅 108.6%（vs 127.6%）——8·23 全量数据重同步改写 market_context_cache 等环境所致，~19pp 列低优先级悬案；hfq 净效应 -13pp 且 DD 更浅
+  - 同环境基线：qfq 对照 108.6%/1.318 vs hfq 现役 95.6%/1.199/DD-13.78%；回退开关 INFERENCE_ADJUST=qfq
+  - 幅度训练入口变更为 `external_data/explore_night/magnitude_20260817/scripts/train_magnitude_for_g.py`（target 语义已在脚本内本地固化，不再依赖共享函数）；原 train_magnitude_align.py 未随迁移验证
