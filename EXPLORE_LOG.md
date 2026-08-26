@@ -107,3 +107,4 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
   - Gate1 真实对比（审计接线修复后）：Top1% 2.12% vs 2.00%、OOS IC_IR +11%、胜率 +3.1pp、年度仅 2025 微降 → 全指标胜出采纳 `chip_accumulation_v6_g_pca1_z_hfq_t2010.pkl`
   - ⚠️ 验证链事故修复：entry/risk 审计器 __main__ 硬编码符号链接旧模型+固定 model_data.csv，此前所有"入场/风控审计"实际审的是旧 qfq 模型；现支持 AUDIT_MODEL_PATH env + 自动配对同名 _data.csv 副档
   - 待办：风控排名模型同法前推试点未做；market_ml 已支持 TRAIN_START_DATE env
+- **2026-08-26 训练起点前推·风控/幅度线关闭**: 风控 t2010 试点 OOS RankIC -0.4705 vs 现役 -0.4724 打平无增益 → 不采纳；幅度模型跟随前推一并关闭（同属短视野任务+阈值重标定链成本高）。结论：**起点前推增益仅存在于排序类长视野任务**
