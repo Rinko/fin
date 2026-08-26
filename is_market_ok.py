@@ -113,6 +113,8 @@ def detect_opportunity_environment_dynamic(zzqz_row, breadth_row, available_brea
 def detect_caution_environment_dynamic(zzqz_row, breadth_row, _total_stocks=None):
     """
     【谨慎环境检测】（动态 v5）
+    注: 原"系统性趋势走坏"信号要求 close<MA60, 但决策树 P4(MA60下方)优先级
+    更高、永远先行触发, 该分支自上线以来从未生效(死代码), 已于 2026-08-26 清理。
     """
     caution_signals = []
 
@@ -120,9 +122,6 @@ def detect_caution_environment_dynamic(zzqz_row, breadth_row, _total_stocks=None
     breadth_weak = breadth_row['high20'] < breadth_row['high20_q40']
     if price_high and breadth_weak:
         caution_signals.append("高位动能枯竭(<Q40)")
-
-    if zzqz_row['close'] < zzqz_row['close_ma60'] and breadth_row['low20'] > breadth_row['low20_q60']:
-        caution_signals.append("系统性趋势走坏")
 
     return caution_signals
 
@@ -225,6 +224,7 @@ def detect_opportunity_environment_fixed(zzqz_row, breadth_row, available_breadt
 def detect_caution_environment_fixed(zzqz_row, breadth_row, total_stocks):
     """
     【谨慎环境检测】（固定阈值原版）
+    注: "系统性趋势走坏"为死代码(被 P4 MA60分支遮蔽), 已清理, 见动态版注释。
     """
     caution_signals = []
 
@@ -232,9 +232,6 @@ def detect_caution_environment_fixed(zzqz_row, breadth_row, total_stocks):
     breadth_weak = breadth_row['high20'] < breadth_row['high20_q40']
     if price_high and breadth_weak:
         caution_signals.append("高位动能枯竭(<Q40)")
-
-    if zzqz_row['close'] < zzqz_row['close_ma60'] and breadth_row['low20'] > breadth_row['low20_q60']:
-        caution_signals.append("系统性趋势走坏")
 
     return caution_signals
 
@@ -316,7 +313,7 @@ def scenario_based_market_judgment(date, zzqz_df, breadth_df, total_stocks=None,
         if is_falling_knife:
             return {
                 'is_market_ok': True,
-                'position_multiplier': 0.7,
+                'position_multiplier': 0.4,
                 'primary_scenario': 'caution',
                 'decision_reason': "【抄底拦截】检测到大盘处于急跌飞刀阶段，强制控仓防御"
             }
@@ -337,20 +334,22 @@ def scenario_based_market_judgment(date, zzqz_df, breadth_df, total_stocks=None,
             'decision_reason': f"【主升进攻】触发：{opportunity_signals[0]}"
         }
 
-    # 优先级 4：均线下方防御拦截（2418 笔大造血的核心基石） [1]
+    # 优先级 4：均线下方 = 修复型机会环境（2026-08-26 语义归位, V4 影子仲裁中性验证）
+    # 实证: 该子类 fwd20 与选股质量长期优于 normal、近窗口优于 opportunity 本尊;
+    # 原先"名为谨慎、实为机会"的错配是历史共演结果, 现按真实语义归入 opportunity。
     elif not is_above_ma60:
         return {
             'is_market_ok': True,
-            'position_multiplier': 0.7,
-            'primary_scenario': 'caution',
-            'decision_reason': "【趋势偏弱】MA60下方，释放LGBM模型防御选股空间"
+            'position_multiplier': 0.8,
+            'primary_scenario': 'opportunity',
+            'decision_reason': "【修复型机会】MA60下方但广度环境成立，释放防御选股空间"
         }
 
-    # 优先级 5：谨慎防守场景
+    # 优先级 5：谨慎防守场景（真防守: 高位动能枯竭; 参数已降至 normal 之下）
     elif len(caution_signals) > 0:
         return {
             'is_market_ok': True,
-            'position_multiplier': 0.7,
+            'position_multiplier': 0.4,
             'primary_scenario': 'caution',
             'decision_reason': f"【高位谨慎】触发：{caution_signals[0]}"
         }

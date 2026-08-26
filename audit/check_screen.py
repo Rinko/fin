@@ -11,8 +11,8 @@ import pandas as pd
 DEFAULT_DEBUG = 'debug_inference_results.csv'
 DEFAULT_AUDIT = 'global_strategy_audit.csv'
 
-# 与 backtest.py before_exec_fn 中 buy_quota 保持一致
-QUOTA_BY_SCENE = {'bottom': 5, 'opportunity': 3, 'normal': 1, 'caution': 2, 'risk': 2}
+# 与 config.py 现役 BUY_QUOTA_* 保持一致 (2026-08-26 语义归位后 caution=1)
+QUOTA_BY_SCENE = {'bottom': 5, 'opportunity': 5, 'normal': 2, 'caution': 1, 'risk': 0}
 
 
 def _normalize_symbols(board):
@@ -258,10 +258,12 @@ def topx_alignment_audit(debug_path=DEFAULT_DEBUG, audit_path=DEFAULT_AUDIT):
         if 'bottom' in sc:
             return 5
         if 'opportunity' in sc:
-            return 3
+            return 5
         if 'normal' in sc:
+            return 2
+        if 'caution' in sc:
             return 1
-        return 2
+        return 0
 
     mismatch = 0
     checked = 0

@@ -36,7 +36,7 @@ DEFAULTS = {
     'ML_RANK_FLOOR_RISK': '0.0',
     # 场景化 quota
     'BUY_QUOTA_BOTTOM': '5', 'BUY_QUOTA_OPPORTUNITY': '5', 'BUY_QUOTA_NORMAL': '2',
-    'BUY_QUOTA_CAUTION': '3', 'BUY_QUOTA_RISK': '0',
+    'BUY_QUOTA_CAUTION': '1', 'BUY_QUOTA_RISK': '0',
     # 业务开关
     'MODERATE_BUSINESS_RULES': '0',
     'USE_PROFIT_RATIO_CON': '0',

@@ -9,7 +9,7 @@
 
 - **模型**：ALIGN 四件套（详见 [USAGE.md](USAGE.md)）
 - **③ sizing 参数**：`OPPORT_HURDLE=0.02 / OPPORT_SIZING_COEFF=0.30 / clip[0.4,1.8]`（网格标定最优）
-- **场景化 quota**：risk=0 / normal=2 / caution=3 / bottom=opp=5
+- **场景化 quota**：risk=0 / normal=2 / caution=1 / bottom=opp=5（2026-08-26 语义归位）
 - **floor**：全关；**仓位基准**：0.04；**初始资金口径**：1M
 - 同口径成绩 vs 旧四件套：127.6% vs 111.6%，Sharpe 1.41 vs 1.27
 
@@ -49,6 +49,8 @@ python get_base_data.py --task all        # 全部数据同步
 3. **训练确定性**：LGBMRegressor 必须设 `deterministic=True, force_row_wise=True`；已验证双训逐位一致。
 
 ## 注意事项（硬性规范）
+
+0. **大盘场景语义归位（2026-08-26）**：原 P4"MA60下方→caution"分支按实证（该子类 fwd20 与选股质量长期优于 normal、近窗口优于 opportunity 本尊）划入 opportunity(乘数 0.8)；真防守 caution（高位动能枯竭/抄底拦截）参数降档至 quota=1/乘数 0.4；死代码"系统性趋势走坏"(被 P4 遮蔽, 从未触发)已清理。行为经影子仲裁 V4 验证为中性（Sharpe 1.112 vs 基线 1.116，回撤略优）。场景健康监控: `python run.py audit scenario`。
 
 1. **PyBroker Logger Bug**：backtest.py 修补 PyBroker 源码拼写错误
 2. **Numba JIT**：首次运行慢
