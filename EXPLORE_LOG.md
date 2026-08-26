@@ -108,3 +108,4 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
   - ⚠️ 验证链事故修复：entry/risk 审计器 __main__ 硬编码符号链接旧模型+固定 model_data.csv，此前所有"入场/风控审计"实际审的是旧 qfq 模型；现支持 AUDIT_MODEL_PATH env + 自动配对同名 _data.csv 副档
   - 待办：风控排名模型同法前推试点未做；market_ml 已支持 TRAIN_START_DATE env
 - **2026-08-26 训练起点前推·风控/幅度线关闭**: 风控 t2010 试点 OOS RankIC -0.4705 vs 现役 -0.4724 打平无增益 → 不采纳；幅度模型跟随前推一并关闭（同属短视野任务+阈值重标定链成本高）。结论：**起点前推增益仅存在于排序类长视野任务**
+- **2026-08-26 前推试点·opport 翻案采纳**: 用户质询推翻"短视野类比关闭"——opport 目标为20日超额收益与入场同视野族。Gate2 双指标通过（Sharpe 1.209/Calmar 0.924 vs 基线 1.199/0.901），分布与现役几乎重合故沿用偏移-0.0063 → `chip_opport_magnitude_excess_for_g_hfq_t2010.pkl` 入 config。修正后规律表述：**起点前推增益存在于20日视野族（入场+opport）；5日跌幅族（风控排名+riskmag）无增益已两次实证**
