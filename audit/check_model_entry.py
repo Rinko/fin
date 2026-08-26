@@ -468,5 +468,13 @@ def run_capacity_audit(model_path=ENTRY_MODEL_DEFAULT, data_path=FALLBACK_DATA):
 
 
 if __name__ == "__main__":
-    run_comprehensive_audit()
-    run_capacity_audit()
+    _mp = os.environ.get('AUDIT_MODEL_PATH') or None
+    if _mp and os.path.exists(_mp):
+        _dp = os.environ.get('AUDIT_DATA_PATH') or (
+            os.path.splitext(_mp)[0]+'_data.csv'
+            if os.path.exists(os.path.splitext(_mp)[0]+'_data.csv') else FALLBACK_DATA)
+    else:
+        _mp, _dp = None, None
+    _kw = {} if _mp is None else dict(model_path=_mp, data_path=_dp)
+    run_comprehensive_audit(**_kw)
+    run_capacity_audit(**_kw)
