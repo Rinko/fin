@@ -238,7 +238,11 @@ class AccumulationTrainer:
         _fund_cols = []
         if os.environ.get('FUND_MOM_PARQUET'):
             _fm = pd.read_parquet(os.environ['FUND_MOM_PARQUET'])
-            global_data = global_data.merge(_fm, on=['symbol', 'date'], how='left')
+            _fm['symbol'] = _fm['symbol'].astype(str).str.extract(r'(\d{6})$')[0]
+            global_data['_fkey'] = global_data['symbol'].astype(int).astype(str).str.zfill(6)
+            global_data = global_data.merge(
+                _fm.rename(columns={'symbol': '_fkey'}), on=['_fkey', 'date'], how='left')
+            global_data = global_data.drop(columns=['_fkey'])
             _fund_cols = [c for c in _fm.columns if c not in ('symbol', 'date')]
             for c in _fund_cols:
                 global_data[c] = global_data.groupby('date')[c].rank(pct=True)
