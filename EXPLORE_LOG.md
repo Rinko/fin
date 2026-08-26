@@ -102,3 +102,8 @@ signal_level_backtest.py # 固定本金 per trade 评估模型+规则
   - ⚠️ **8·22 锚点不可复现实锤**：同模型同口径当日重跑仅 108.6%（vs 127.6%）——8·23 全量数据重同步改写 market_context_cache 等环境所致，~19pp 列低优先级悬案；hfq 净效应 -13pp 且 DD 更浅
   - 同环境基线：qfq 对照 108.6%/1.318 vs hfq 现役 95.6%/1.199/DD-13.78%；回退开关 INFERENCE_ADJUST=qfq
   - 幅度训练入口变更为 `external_data/explore_night/magnitude_20260817/scripts/train_magnitude_for_g.py`（target 语义已在脚本内本地固化，不再依赖共享函数）；原 train_magnitude_align.py 未随迁移验证
+- **2026-08-26 训练起点前推试点采纳**（TRAIN_START 2012-03-12 → 2010-01-01，入场模型）:
+  - 动因：hfq 迁移后低价精度约束消失；数据体检显示缓存含 321 只退市股(5.8%)、2010 年前数据 1364 只——幸存者偏差可控
+  - Gate1 真实对比（审计接线修复后）：Top1% 2.12% vs 2.00%、OOS IC_IR +11%、胜率 +3.1pp、年度仅 2025 微降 → 全指标胜出采纳 `chip_accumulation_v6_g_pca1_z_hfq_t2010.pkl`
+  - ⚠️ 验证链事故修复：entry/risk 审计器 __main__ 硬编码符号链接旧模型+固定 model_data.csv，此前所有"入场/风控审计"实际审的是旧 qfq 模型；现支持 AUDIT_MODEL_PATH env + 自动配对同名 _data.csv 副档
+  - 待办：风控排名模型同法前推试点未做；market_ml 已支持 TRAIN_START_DATE env
